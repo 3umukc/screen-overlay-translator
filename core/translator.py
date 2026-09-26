@@ -2,6 +2,7 @@ import re
 import urllib.request
 import urllib.parse
 import json
+import html
 from typing import Optional, Tuple, Dict
 
 # In-memory translation and language detection cache
@@ -156,7 +157,31 @@ def translate_and_detect_lang(
             _translation_cache[cache_key] = (translated, detected_lang)
             return translated, detected_lang
     except Exception:
-        # Fallback to local dictionary if offline
+        # Fallback 1: MyMemory API (handles cases when Google returns 429 rate limit)
+        try:
+            eff_sl = source_lang
+            if eff_sl == "auto":
+                eff_sl = detect_language_heuristic(cleaned)
+            if eff_sl == "auto":
+                eff_sl = "en"
+            
+            q = urllib.parse.quote(cleaned)
+            mm_url = f"https://api.mymemory.translated.net/get?q={q}&langpair={eff_sl}|{target_lang}"
+            mm_req = urllib.request.Request(
+                mm_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            )
+            with urllib.request.urlopen(mm_req, timeout=2.5) as mm_resp:
+                mm_data = json.loads(mm_resp.read().decode("utf-8"))
+                if mm_data and "responseData" in mm_data and "translatedText" in mm_data["responseData"]:
+                    trans = html.unescape(mm_data["responseData"]["translatedText"]).strip()
+                    if trans and trans.lower() != cleaned.lower():
+                        _translation_cache[cache_key] = (trans, eff_sl)
+                        return trans, eff_sl
+        except Exception:
+            pass
+
+        # Fallback 2: local dictionary if offline
         from core.dictionary import translate_phrase_or_tokens
         local_trans = translate_phrase_or_tokens(cleaned, sl=source_lang, tl=target_lang)
         detected = detect_language_heuristic(cleaned)

@@ -92,6 +92,21 @@ def fetch_online_translation(text: str, sl: str = "ru", tl: str = "en", timeout:
                 return res
     except Exception:
         pass
+
+    try:
+        import html
+        q = urllib.parse.quote(cleaned)
+        url = f"https://api.mymemory.translated.net/get?q={q}&langpair={sl}|{tl}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if data and "responseData" in data and "translatedText" in data["responseData"]:
+                res = html.unescape(data["responseData"]["translatedText"]).strip()
+                if res and res.lower() != cleaned.lower():
+                    ONLINE_CACHE[key] = res
+                    return res
+    except Exception:
+        pass
     return ""
 
 # Multi-word Russian to English phrases

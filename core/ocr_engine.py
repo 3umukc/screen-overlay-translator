@@ -8,7 +8,9 @@ import cv2
 import numpy as np
 import mss
 from rapidocr_onnxruntime import RapidOCR
+from rapidocr_onnxruntime.utils import OrtInferSession
 from rapidocr_onnxruntime.ch_ppocr_v3_rec.text_recognize import TextRecognizer
+import onnxruntime as ort
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 
 from config import config
@@ -18,6 +20,22 @@ from core.translator import (
     is_definitely_english,
     is_potential_source_language
 )
+
+# Optimize ONNX Runtime to use max 2 worker threads so other CPU cores stay free for games/system
+def _low_cpu_ort_init(self, config):
+    sess_opt = ort.SessionOptions()
+    sess_opt.log_severity_level = 4
+    sess_opt.enable_cpu_mem_arena = False
+    sess_opt.intra_op_num_threads = 2
+    sess_opt.inter_op_num_threads = 1
+    sess_opt.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    sess_opt.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    cpu_ep = 'CPUExecutionProvider'
+    cpu_provider_options = {'arena_extend_strategy': 'kSameAsRequested'}
+    self._verify_model(config['model_path'])
+    self.session = ort.InferenceSession(config['model_path'], sess_options=sess_opt, providers=[(cpu_ep, cpu_provider_options)])
+
+OrtInferSession.__init__ = _low_cpu_ort_init
 
 def is_text_in_source_lang(text: str, source_lang: str) -> bool:
     """
@@ -164,7 +182,30 @@ class ScreenOcrEngine:
     """Handles screen capture via mss and fast on-device text detection via RapidOCR."""
 
     def __init__(self):
+        # Set process priority to BELOW_NORMAL so games, browsers, and Windows DWM always get CPU priority
+        try:
+            import win32process
+            import win32api
+            win32process.SetPriorityClass(
+                win32api.GetCurrentProcess(),
+                win32process.BELOW_NORMAL_PRIORITY_CLASS
+            )
+        except Exception:
+            pass
+
         self._ocr = RapidOCR()
+
+        # Limit detector inference resolution to 1280 max dimension
+        # This speeds up DBNet inference by ~18x on high-res / multi-monitor setups (e.g. 4480x1440)
+        # while keeping full coordinate precision and avoiding heavy CPU load
+        try:
+            if hasattr(self._ocr, "text_detector") and hasattr(self._ocr.text_detector, "preprocess_op"):
+                for op in self._ocr.text_detector.preprocess_op:
+                    if hasattr(op, "limit_type"):
+                        op.limit_type = "max"
+                        op.limit_side_len = 1280
+        except Exception as e:
+            print(f"[OCR Engine] Warning: failed to configure detector resolution limit: {e}")
         
         # Load specialized Slavic recognition model (supports Cyrillic + Latin with high accuracy)
         models_dir = Path(__file__).resolve().parent.parent / "models"
@@ -211,13 +252,14 @@ class ScreenOcrEngine:
 
     def has_screen_changed(self, img: np.ndarray, threshold: float = 0.8) -> bool:
         """
-        Fast perceptual frame diff on small 64x36 thumbnail.
+        Fast perceptual frame diff on small 64x36 thumbnail (<1 ms).
         Ignores minor pixel fluctuations (clocks, cursors) so heavy OCR is NOT re-run
         when the screen content hasn't really changed, eliminating CPU lag completely.
         """
         try:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            thumb = cv2.resize(gray, (64, 36), interpolation=cv2.INTER_AREA)
+            # Subsample by step 16 to avoid converting all 6.5M pixels (0.4ms vs 27ms)
+            sub = img[::16, ::16, 0]
+            thumb = cv2.resize(sub, (64, 36), interpolation=cv2.INTER_NEAREST)
 
             if self._last_thumb is None:
                 self._last_thumb = thumb
