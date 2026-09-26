@@ -2,10 +2,13 @@ import time
 import re
 import hashlib
 import threading
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
+import cv2
 import numpy as np
 import mss
 from rapidocr_onnxruntime import RapidOCR
+from rapidocr_onnxruntime.ch_ppocr_v3_rec.text_recognize import TextRecognizer
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 
 from config import config
@@ -57,6 +60,26 @@ class ScreenOcrEngine:
 
     def __init__(self):
         self._ocr = RapidOCR()
+        
+        # Load specialized Slavic recognition model (supports Cyrillic + Latin with high accuracy)
+        models_dir = Path(__file__).resolve().parent.parent / "models"
+        eslav_model = models_dir / "eslav_rec.onnx"
+        eslav_dict = models_dir / "eslav_dict.txt"
+
+        if eslav_model.exists() and eslav_dict.exists():
+            try:
+                rec_cfg = {
+                    'model_path': str(eslav_model),
+                    'keys_path': str(eslav_dict),
+                    'use_cuda': False,
+                    'rec_img_shape': [3, 48, 320],
+                    'rec_batch_num': 6
+                }
+                self._ocr.text_recognizer = TextRecognizer(rec_cfg)
+                print("[OCR Engine] Successfully loaded Slavic recognition model (eslav_rec.onnx)")
+            except Exception as e:
+                print(f"[OCR Engine] Warning: failed to load eslav model: {e}")
+
         self._sct = mss.mss()
         self._last_hash = ""
 
@@ -82,15 +105,11 @@ class ScreenOcrEngine:
 
     def compute_image_hash(self, img: np.ndarray) -> str:
         """Computes a fast perceptual hash to detect unchanged frames."""
-        # Downsample to 32x32 grayscale
-        h, w = img.shape[:2]
-        if h > 32 and w > 32:
-            step_y = max(1, h // 32)
-            step_x = max(1, w // 32)
-            thumb = img[::step_y, ::step_x, 0]
-        else:
-            thumb = img[:, :, 0]
-        return hashlib.md5(thumb.tobytes()).hexdigest()
+        try:
+            thumb = cv2.resize(img, (160, 90), interpolation=cv2.INTER_AREA)
+            return hashlib.md5(thumb.tobytes()).hexdigest()
+        except Exception:
+            return ""
 
     def process_screen(
         self,

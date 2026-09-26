@@ -47,5 +47,25 @@ class TestScreenOcr(unittest.TestCase):
         self.assertEqual(hash1, hash2)
         self.assertNotEqual(hash1, hash3)
 
+    def test_rapidocr_serbian_recognition(self):
+        from PIL import Image, ImageDraw, ImageFont
+        engine = ScreenOcrEngine()
+        font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 28)
+
+        img = Image.new("RGB", (800, 200), color=(255, 255, 255))
+        d = ImageDraw.Draw(img)
+        d.text((40, 30), "Српски витезови", fill=(0, 0, 0), font=font)
+        d.text((40, 100), "Dobar dan prijatelju", fill=(0, 0, 0), font=font)
+
+        img_bgr = np.array(img)[:, :, ::-1]
+        engine.capture_image = lambda zone=None: (img_bgr, 0, 0)
+
+        blocks = engine.process_screen(source_lang="sr", target_lang="ru", force=True)
+        self.assertIsNotNone(blocks)
+        self.assertGreaterEqual(len(blocks), 1)
+
+        recognized_texts = " ".join([b["src_text"] for b in blocks])
+        self.assertTrue("витезови" in recognized_texts or "Српски" in recognized_texts or "Dobar" in recognized_texts)
+
 if __name__ == "__main__":
     unittest.main()

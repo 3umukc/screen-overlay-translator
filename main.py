@@ -161,13 +161,11 @@ class ScreenOverlayApp:
     def run(self):
         src = config.get("source_lang", "sr").upper()
         tgt = config.get("target_lang", "ru").upper()
-        # Show welcome test pill for 3.5 seconds so user immediately sees the overlay
-        self.show_test_pill(f"Экранный переводчик активен [{src} -> {tgt}]. Нажмите Ctrl+Alt+T для проверки.")
         self.tray.showMessage(
             "Экранный переводчик",
-            f"Автосканирование активно: распознает {src} и переводит на {tgt} в реальном времени без скриншотов.",
+            f"Автосканирование активно: распознает {src} и переводит на {tgt} прямо поверх текста.",
             QSystemTrayIcon.MessageIcon.Information,
-            3000
+            2500
         )
         sys.exit(self.app.exec())
 

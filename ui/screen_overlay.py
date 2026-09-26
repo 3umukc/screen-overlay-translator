@@ -91,9 +91,11 @@ class ScreenOverlayWindow(QWidget):
             for existing in self._active_blocks:
                 dist_x = abs(existing.box[0] - box[0])
                 dist_y = abs(existing.box[1] - box[1])
-                if dist_x < 35 and dist_y < 25 and existing.src_text == src:
+                if dist_x < 35 and dist_y < 25:
                     existing.update_box(box)
+                    existing.src_text = src
                     existing.trans_text = trans
+                    existing.detected_lang = detected
                     found = True
                     break
 
@@ -133,9 +135,9 @@ class ScreenOverlayWindow(QWidget):
         """Displays a test translation pill in the center of the primary monitor."""
         screen_geo = QApplication.primaryScreen().geometry()
         cx = screen_geo.x() + screen_geo.width() // 2 - 160
-        cy = screen_geo.y() + screen_geo.height() // 2 - 40
+        cy = screen_geo.y() + screen_geo.height() // 2 - 20
         self.update_blocks([{
-            "box": (cx, cy, 320, 45),
+            "box": (cx, cy, 320, 36),
             "src_text": "Dobar dan",
             "trans_text": text,
             "detected_lang": "sr",
@@ -150,74 +152,70 @@ class ScreenOverlayWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
-        font_size = config.get("ocr.font_size", 13)
-        font = QFont("Segoe UI", font_size, QFont.Weight.DemiBold)
-        painter.setFont(font)
-        fm = QFontMetrics(font)
-
         screen_w = self.width()
         screen_h = self.height()
 
-        # Modern Frosted Dark Glass Theme
-        bg_brush = QBrush(QColor(15, 23, 42, 228))  # Deep slate navy
-        border_pen = QPen(QColor(99, 102, 241, 185), 1.2)  # Soft electric indigo
-        text_pen = QColor(255, 255, 255, 255)  # Crisp white
-        accent_dot_brush = QBrush(QColor(16, 185, 129))  # Emerald accent indicator
+        opacity = config.get("ocr.opacity", 0.94)
+        alpha = int(opacity * 255)
+        # Google Lens style dark patch
+        bg_brush = QBrush(QColor(18, 22, 30, alpha))
+        border_pen = QPen(QColor(60, 70, 90, 140), 1.0)
+        text_pen = QColor(255, 255, 255, 255)
 
         for block in self._active_blocks:
             bx, by, bw, bh = block.box
             trans_text = block.trans_text
+            if not trans_text:
+                continue
 
-            # Measure text layout
-            calc_w = max(int(bw), 130)
-            text_bound = fm.boundingRect(
-                0, 0,
-                calc_w, 0,
-                Qt.TextFlag.TextWordWrap,
-                trans_text
-            )
+            # Fit font size to the detected text line height
+            font_size = max(11, min(int(bh * 0.72), 24))
+            font = QFont("Segoe UI", font_size, QFont.Weight.Medium)
+            painter.setFont(font)
+            fm = QFontMetrics(font)
 
-            pad_x = 9
-            pad_y = 5
-            dot_size = 5
-            dot_margin = 8
+            pad_x = 4
+            pad_y = 2
 
-            pill_w = text_bound.width() + pad_x * 2 + dot_size + dot_margin
-            pill_h = text_bound.height() + pad_y * 2
+            text_w = fm.horizontalAdvance(trans_text)
+            text_h = fm.height()
 
-            # Position pill directly over or slightly above the recognized text
-            pill_x = bx
-            if pill_x + pill_w > screen_w - 10:
-                pill_x = max(10, screen_w - pill_w - 10)
+            # Google Lens in-place patch directly covering the recognized text box
+            patch_w = max(float(bw), float(text_w)) + pad_x * 2
+            patch_h = max(float(bh), float(text_h)) + pad_y * 2
 
-            pill_y = by - pill_h - 3
-            if pill_y < 10:
-                # If off-screen at top, place directly inside/over the text
-                pill_y = by
+            patch_x = float(bx) - pad_x
+            patch_y = float(by) - pad_y
 
-            pill_rect = QRectF(pill_x, pill_y, pill_w, pill_h)
+            # Keep strictly within screen bounds
+            if patch_x < 0:
+                patch_x = 0
+            elif patch_x + patch_w > screen_w:
+                patch_x = max(0.0, screen_w - patch_w)
 
-            # Draw rounded pill
+            if patch_y < 0:
+                patch_y = 0
+            elif patch_y + patch_h > screen_h:
+                patch_y = max(0.0, screen_h - patch_h)
+
+            patch_rect = QRectF(patch_x, patch_y, patch_w, patch_h)
+
+            # Draw dark background patch masking original text
             painter.setPen(border_pen)
             painter.setBrush(bg_brush)
-            painter.drawRoundedRect(pill_rect, 6.0, 6.0)
+            painter.drawRoundedRect(patch_rect, 3.5, 3.5)
 
-            # Draw small emerald indicator dot
-            dot_y = pill_rect.y() + (pill_rect.height() - dot_size) / 2
-            dot_x = pill_rect.x() + pad_x
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(accent_dot_brush)
-            painter.drawEllipse(QRectF(dot_x, dot_y, dot_size, dot_size))
-
-            # Draw translated text
-            text_x = dot_x + dot_size + dot_margin
-            text_y = pill_rect.y() + pad_y
-            text_rect = QRectF(text_x, text_y, text_bound.width(), text_bound.height())
-
+            # Draw white translated text centered vertically
+            text_rect = QRectF(
+                patch_x + pad_x,
+                patch_y + pad_y,
+                patch_w - pad_x * 2,
+                patch_h - pad_y * 2
+            )
             painter.setPen(text_pen)
             painter.drawText(
                 text_rect,
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap,
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                 trans_text
             )
 
