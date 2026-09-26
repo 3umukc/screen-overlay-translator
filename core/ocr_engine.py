@@ -1,14 +1,15 @@
 import time
 import re
 import hashlib
+import threading
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import mss
 from rapidocr_onnxruntime import RapidOCR
-from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QThread
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 
 from config import config
-from core.dictionary import is_cyrillic, translate_phrase_or_tokens
+from core.translator import translate_and_detect_lang, matches_source_language
 
 def is_text_in_source_lang(text: str, source_lang: str) -> bool:
     """
@@ -134,17 +135,21 @@ class ScreenOcrEngine:
                     continue
 
                 text = raw_text.strip()
-                if not text:
+                if not text or len(text) < 2:
                     continue
 
-                # Filter by user-selected source language
+                # Translate and detect language
+                trans_text, detected_lang = translate_and_detect_lang(text, source_lang=source_lang, target_lang=target_lang)
+                if not trans_text:
+                    continue
+
+                # Filter by source language: if Serbian is chosen, English text is strictly rejected!
                 if config.get("ocr.filter_by_source_lang", True):
-                    if not is_text_in_source_lang(text, source_lang):
+                    if not matches_source_language(detected_lang, text, source_lang):
                         continue
 
-                # Translate text block
-                trans_text = translate_phrase_or_tokens(text, sl=source_lang, tl=target_lang)
-                if not trans_text:
+                # Don't show overlay if translation is identical to source
+                if trans_text.lower().strip() == text.lower().strip():
                     continue
 
                 # Convert local coordinates to global screen coordinates
@@ -163,6 +168,7 @@ class ScreenOcrEngine:
                     "polygon": poly,
                     "src_text": text,
                     "trans_text": trans_text,
+                    "detected_lang": detected_lang,
                     "score": float(score)
                 })
 
@@ -191,7 +197,7 @@ class ScreenOcrWorker(QObject):
             self._engine = ScreenOcrEngine()
 
     def scan_once(self, force: bool = True):
-        """Triggers a single manual screen OCR scan."""
+        """Triggers a single screen OCR scan."""
         if self._is_busy:
             return
         self._is_busy = True
@@ -201,9 +207,9 @@ class ScreenOcrWorker(QObject):
             try:
                 self._ensure_engine()
                 zone = config.get("ocr.zone", None)
-                src = config.get("source_lang", "en")
+                src = config.get("source_lang", "sr")
                 tgt = config.get("target_lang", "ru")
-                conf = config.get("ocr.confidence_threshold", 0.4)
+                conf = config.get("ocr.confidence_threshold", 0.35)
 
                 res = self._engine.process_screen(
                     zone=zone,
@@ -218,9 +224,8 @@ class ScreenOcrWorker(QObject):
                 self._is_busy = False
                 self.scan_finished.emit()
 
-        # Run on a background thread so GUI never lags
-        thread = QThread.create(_run)
-        thread.start()
+        # Run on a background daemon thread so GUI never lags or freezes
+        threading.Thread(target=_run, daemon=True).start()
 
     def start_auto_scan(self, interval_ms: int = 700):
         """Starts periodic background scanning."""

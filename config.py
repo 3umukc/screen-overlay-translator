@@ -4,17 +4,17 @@ from pathlib import Path
 from typing import Any, Dict
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "source_lang": "en",
+    "source_lang": "sr",
     "target_lang": "ru",
     "ocr": {
-        "auto_scan_enabled": False,
-        "interval_ms": 700,
+        "auto_scan_enabled": True,
+        "interval_ms": 600,
         "zone": None,
         "font_size": 13,
-        "opacity": 0.9,
+        "opacity": 0.92,
         "filter_by_source_lang": True,
-        "confidence_threshold": 0.4,
-        "auto_clear_ms": 4000
+        "confidence_threshold": 0.35,
+        "auto_clear_ms": 3000
     },
     "hotkeys": {
         "scan": "Ctrl+Alt+S",

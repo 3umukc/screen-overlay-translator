@@ -62,21 +62,21 @@ class ScreenOverlayApp:
         self.setup_tray_menu()
         self.tray.show()
 
-        # Check if auto-scan should start immediately
-        if config.get("ocr.auto_scan_enabled", False):
-            interval = config.get("ocr.interval_ms", 700)
+        # Auto-scan enabled by default (real-time screen detection without manual screenshots)
+        if config.get("ocr.auto_scan_enabled", True):
+            interval = config.get("ocr.interval_ms", 600)
             self.ocr_worker.start_auto_scan(interval)
 
     def setup_tray_menu(self):
         menu = QMenu()
 
-        self.scan_action = menu.addAction("Снимок экрана и перевод (Ctrl+Alt+S)")
-        self.scan_action.triggered.connect(self.trigger_scan)
-
         self.auto_action = menu.addAction("Автосканирование экрана (Ctrl+Alt+O)")
         self.auto_action.setCheckable(True)
-        self.auto_action.setChecked(config.get("ocr.auto_scan_enabled", False))
+        self.auto_action.setChecked(config.get("ocr.auto_scan_enabled", True))
         self.auto_action.triggered.connect(self.toggle_auto_scan)
+
+        self.scan_action = menu.addAction("Снимок экрана и перевод (Ctrl+Alt+S)")
+        self.scan_action.triggered.connect(self.trigger_scan)
 
         self.zone_action = menu.addAction("Выбрать зону экрана (Ctrl+Alt+Z)")
         self.zone_action.triggered.connect(self.start_zone_selection)
@@ -152,9 +152,11 @@ class ScreenOverlayApp:
         self.app.quit()
 
     def run(self):
+        src = config.get("source_lang", "sr").upper()
+        tgt = config.get("target_lang", "ru").upper()
         self.tray.showMessage(
             "Экранный переводчик",
-            "Приложение запущено в трее. Горячие клавиши: Ctrl+Alt+S (снимок), Ctrl+Alt+O (авто), Ctrl+Alt+Z (зона).",
+            f"Автосканирование активно: распознает {src} и переводит на {tgt} в реальном времени без скриншотов.",
             QSystemTrayIcon.MessageIcon.Information,
             3000
         )
