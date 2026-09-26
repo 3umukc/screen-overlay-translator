@@ -12,7 +12,12 @@ from rapidocr_onnxruntime.ch_ppocr_v3_rec.text_recognize import TextRecognizer
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 
 from config import config
-from core.translator import translate_and_detect_lang, matches_source_language, is_definitely_english
+from core.translator import (
+    translate_and_detect_lang,
+    matches_source_language,
+    is_definitely_english,
+    is_potential_source_language
+)
 
 def is_text_in_source_lang(text: str, source_lang: str) -> bool:
     """
@@ -80,28 +85,27 @@ class ScreenOcrEngine:
             except Exception as e:
                 print(f"[OCR Engine] Warning: failed to load eslav model: {e}")
 
-        self._sct = mss.mss()
         self._last_hash = ""
 
     def capture_image(self, zone: Optional[Tuple[int, int, int, int]] = None) -> Tuple[np.ndarray, int, int]:
         """
-        Captures screen or specific zone.
+        Captures screen or specific zone safely within the calling thread.
         Returns: (image_bgr_numpy, offset_x, offset_y)
         """
-        if zone:
-            x, y, w, h = zone
-            monitor = {"top": int(y), "left": int(x), "width": int(w), "height": int(h)}
-            offset_x, offset_y = int(x), int(y)
-        else:
-            # Capture all monitors (full virtual desktop: monitors[0])
-            mon = self._sct.monitors[0]
-            monitor = {"top": mon["top"], "left": mon["left"], "width": mon["width"], "height": mon["height"]}
-            offset_x, offset_y = mon["left"], mon["top"]
+        with mss.mss() as sct:
+            if zone:
+                x, y, w, h = zone
+                monitor = {"top": int(y), "left": int(x), "width": int(w), "height": int(h)}
+                offset_x, offset_y = int(x), int(y)
+            else:
+                # Capture primary monitor (faster and avoids multi-monitor desktop clutter)
+                mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                monitor = {"top": mon["top"], "left": mon["left"], "width": mon["width"], "height": mon["height"]}
+                offset_x, offset_y = mon["left"], mon["top"]
 
-        sct_img = self._sct.grab(monitor)
-        # Convert BGRA to BGR
-        img = np.array(sct_img)[:, :, :3]
-        return img, offset_x, offset_y
+            sct_img = sct.grab(monitor)
+            img = np.array(sct_img)[:, :, :3]
+            return img, offset_x, offset_y
 
     def compute_image_hash(self, img: np.ndarray) -> str:
         """Computes a fast perceptual hash to detect unchanged frames."""
@@ -121,17 +125,6 @@ class ScreenOcrEngine:
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Captures screen/zone, runs OCR, filters by source_lang, and translates.
-        Returns list of recognized and translated blocks:
-        [
-            {
-                "box": (x, y, w, h),
-                "polygon": [[x1, y1], [x2, y2], [x3, y3], [x4, y4]],
-                "src_text": "...",
-                "trans_text": "...",
-                "score": 0.95
-            },
-            ...
-        ]
         """
         try:
             img, offset_x, offset_y = self.capture_image(zone)
@@ -162,16 +155,17 @@ class ScreenOcrEngine:
                 if not text or len(text) < 2:
                     continue
 
-                # Fast local filter: if Serbian is chosen and text is definitely English, skip immediately
-                if source_lang == "sr" and is_definitely_english(text):
-                    continue
+                # Ultra-fast local prefilter: rejects Russian, English, symbols in 0ms without HTTP requests
+                if config.get("ocr.filter_by_source_lang", True):
+                    if not is_potential_source_language(text, source_lang):
+                        continue
 
                 # Translate and detect language
                 trans_text, detected_lang = translate_and_detect_lang(text, source_lang=source_lang, target_lang=target_lang)
                 if not trans_text:
                     continue
 
-                # Filter by source language: if Serbian is chosen, English text is strictly rejected!
+                # Secondary strict verification
                 if config.get("ocr.filter_by_source_lang", True):
                     if not matches_source_language(detected_lang, text, source_lang):
                         continue

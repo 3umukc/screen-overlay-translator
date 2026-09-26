@@ -11,15 +11,19 @@ SERBIAN_CYRILLIC_CHARS = re.compile(r"[ђјљњћџЂЈЉЊЋЏ]")
 SERBIAN_LATIN_CHARS = re.compile(r"[čćđšžČĆĐŠŽ]")
 CYRILLIC_PATTERN = re.compile(r"[\u0400-\u04FF]")
 CJK_PATTERN = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
-RUSSIAN_UKRAINIAN_EXCLUSIVE = re.compile(r"[ыэъёщіїєґўЫЭЪЁЩІЇЄҐЎ]")
+RUSSIAN_UKRAINIAN_EXCLUSIVE = re.compile(r"[ыэъёщяюьієїґўЫЭЪЁЩЯЮЬІЄЇҐЎ]")
 
 SERBIAN_STOPWORDS = {
     "da", "ne", "je", "sam", "smo", "ste", "su", "kako", "gde", "sta", "sto",
-    "dobro", "hvala", "molim", "dan", "noc", "igra", "nema", "ima", "idemo",
+    "dobro", "hvala", "molim", "izvolite", "dan", "noc", "vece", "igra", "nema", "ima", "idemo",
     "sve", "mnogo", "ovde", "tamo", "za", "od", "do", "sa", "na", "u", "i",
     "ili", "ali", "vec", "kad", "ako", "brat", "druze", "prijatelju", "pozdrav",
     "lepo", "super", "ko", "zasto", "vidimo", "radi", "hocu", "necu", "moze",
-    "sutra", "danas", "kazi", "gledaj", "dodji", "stani", "brate", "pazi", "brzo"
+    "sutra", "danas", "kazi", "gledaj", "dodji", "stani", "brate", "pazi", "brzo",
+    "srpski", "srpska", "srpsko", "srpske", "srpskom", "jezik", "jezika", "jeziku",
+    "strance", "stranci", "knjiga", "tekst", "rec", "reci", "reč", "reči",
+    "nauci", "naucimo", "naucite", "usluzno", "pecenje", "kupljeno", "kupljenog",
+    "govor", "govori", "akcenat", "akcenta", "vitez", "vitezovi"
 }
 
 COMMON_ENGLISH_WORDS = {
@@ -38,7 +42,13 @@ COMMON_ENGLISH_WORDS = {
     "mana", "inventory", "level", "kill", "death", "assist", "gold", "items",
     "victory", "defeat", "match", "start", "quit", "exit", "ping", "fps", "hero",
     "target", "strength", "agility", "intelligence", "score", "respawn", "buyback",
-    "game", "talent", "chat", "mute", "unmute", "report", "stats", "rank"
+    "game", "talent", "chat", "mute", "unmute", "report", "stats", "rank",
+    "keyboard", "layout", "online", "download", "free", "google", "search", "images", "web"
+}
+
+COMMON_RUSSIAN_UI = {
+    "картинки", "новости", "видео", "покупки", "инструменты", "поиск", "вкладка",
+    "настройки", "сохранить", "отмена", "войти", "выход", "закрыть", "ок"
 }
 
 def is_definitely_english(text: str) -> bool:
@@ -52,6 +62,49 @@ def is_definitely_english(text: str) -> bool:
     if words.intersection(COMMON_ENGLISH_WORDS) and not words.intersection(SERBIAN_STOPWORDS):
         return True
     return False
+
+def is_potential_source_language(text: str, source_lang: str) -> bool:
+    """
+    Ultra-fast 0ms local pre-filter to reject non-candidate phrases
+    BEFORE making any HTTP requests to Google Translate.
+    """
+    cleaned = text.strip()
+    if len(cleaned) < 2:
+        return False
+    if not re.search(r"\w", cleaned):
+        return False
+
+    if source_lang == "sr":
+        lower = cleaned.lower()
+        if is_definitely_english(lower):
+            return False
+
+        # Reject Russian/Ukrainian exclusive letters (я, ю, ы, э, ё, щ, ь, ъ)
+        if RUSSIAN_UKRAINIAN_EXCLUSIVE.search(lower):
+            return False
+
+        # Unique Serbian Cyrillic or Latin letters
+        if SERBIAN_CYRILLIC_CHARS.search(lower) or SERBIAN_LATIN_CHARS.search(lower):
+            return True
+
+        words = set(re.findall(r"\b\w+\b", lower))
+        if words and words.intersection(SERBIAN_STOPWORDS):
+            return True
+
+        # Any other Cyrillic without Russian-exclusive letters
+        has_cyrillic = bool(CYRILLIC_PATTERN.search(lower))
+        if has_cyrillic:
+            if words.intersection(COMMON_RUSSIAN_UI):
+                return False
+            return True
+
+        # Pure Latin text without diacritics
+        if bool(re.search(r"[a-zA-Z]", lower)):
+            return bool(words.intersection(SERBIAN_STOPWORDS))
+
+        return False
+
+    return True
 
 def translate_and_detect_lang(
     text: str,
