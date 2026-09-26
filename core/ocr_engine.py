@@ -185,7 +185,8 @@ class ScreenOcrEngine:
             except Exception as e:
                 print(f"[OCR Engine] Warning: failed to load eslav model: {e}")
 
-        self._last_hash = ""
+        self._last_thumb = None
+        self._last_matched: List[Dict[str, Any]] = []
 
     def capture_image(self, zone: Optional[Tuple[int, int, int, int]] = None) -> Tuple[np.ndarray, int, int]:
         """
@@ -208,13 +209,28 @@ class ScreenOcrEngine:
             img = np.array(sct_img)[:, :, :3]
             return img, offset_x, offset_y
 
-    def compute_image_hash(self, img: np.ndarray) -> str:
-        """Computes a fast perceptual hash to detect unchanged frames."""
+    def has_screen_changed(self, img: np.ndarray, threshold: float = 0.8) -> bool:
+        """
+        Fast perceptual frame diff on small 64x36 thumbnail.
+        Ignores minor pixel fluctuations (clocks, cursors) so heavy OCR is NOT re-run
+        when the screen content hasn't really changed, eliminating CPU lag completely.
+        """
         try:
-            thumb = cv2.resize(img, (160, 90), interpolation=cv2.INTER_AREA)
-            return hashlib.md5(thumb.tobytes()).hexdigest()
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            thumb = cv2.resize(gray, (64, 36), interpolation=cv2.INTER_AREA)
+
+            if self._last_thumb is None:
+                self._last_thumb = thumb
+                return True
+
+            diff = float(np.mean(np.abs(thumb.astype(np.int16) - self._last_thumb.astype(np.int16))))
+            if diff < threshold:
+                return False
+
+            self._last_thumb = thumb
+            return True
         except Exception:
-            return ""
+            return True
 
     def process_screen(
         self,
@@ -225,19 +241,14 @@ class ScreenOcrEngine:
         force: bool = False
     ) -> Optional[List[Dict[str, Any]]]:
         """
-        Captures screen/zone, runs OCR, filters by source_lang, and translates.
+        Captures screen/zone, runs OCR only when screen changed, and translates.
         """
         try:
             img, offset_x, offset_y = self.capture_image(zone)
-            img_hash = self.compute_image_hash(img)
 
-            if not force and img_hash == self._last_hash:
-                # If frame is identical and we had active blocks, refresh them so they don't disappear
-                if getattr(self, "_last_matched", None):
-                    return self._last_matched
-                return None
-
-            self._last_hash = img_hash
+            if not force and not self.has_screen_changed(img):
+                # Screen unchanged: instantly reuse previous scan results, zero OCR load
+                return self._last_matched
 
             t0 = time.time()
             ocr_results, _ = self._ocr(img)
@@ -365,8 +376,8 @@ class ScreenOcrWorker(QObject):
         # Run on a background daemon thread so GUI never lags or freezes
         threading.Thread(target=_run, daemon=True).start()
 
-    def start_auto_scan(self, interval_ms: int = 700):
-        """Starts periodic background scanning."""
+    def start_auto_scan(self, interval_ms: int = 1000):
+        """Starts periodic background scanning (1 second per tick)."""
         self._timer.setInterval(interval_ms)
         self._timer.start()
 

@@ -65,7 +65,7 @@ class ScreenOverlayApp:
 
         # Auto-scan enabled by default (real-time screen detection without manual screenshots)
         if config.get("ocr.auto_scan_enabled", True):
-            interval = config.get("ocr.interval_ms", 600)
+            interval = config.get("ocr.interval_ms", 1000)
             self.ocr_worker.start_auto_scan(interval)
 
     def setup_tray_menu(self):
@@ -118,7 +118,7 @@ class ScreenOverlayApp:
         is_running = self.ocr_worker.is_auto_scanning()
         new_state = not is_running
         config.set("ocr.auto_scan_enabled", new_state)
-        interval = config.get("ocr.interval_ms", 700)
+        interval = config.get("ocr.interval_ms", 1000)
 
         if new_state:
             self.ocr_worker.start_auto_scan(interval)
@@ -140,7 +140,7 @@ class ScreenOverlayApp:
 
     def on_settings_changed(self):
         auto_enabled = bool(config.get("ocr.auto_scan_enabled", False))
-        interval = config.get("ocr.interval_ms", 700)
+        interval = config.get("ocr.interval_ms", 1000)
         self.auto_action.setChecked(auto_enabled)
 
         if auto_enabled:

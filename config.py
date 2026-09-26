@@ -8,7 +8,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "target_lang": "ru",
     "ocr": {
         "auto_scan_enabled": True,
-        "interval_ms": 600,
+        "interval_ms": 1000,
         "zone": None,
         "font_size": 13,
         "opacity": 0.92,

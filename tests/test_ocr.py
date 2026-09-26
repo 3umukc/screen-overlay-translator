@@ -40,12 +40,12 @@ class TestScreenOcr(unittest.TestCase):
         img2 = np.zeros((100, 100, 3), dtype=np.uint8)
         img3 = np.ones((100, 100, 3), dtype=np.uint8) * 255
 
-        hash1 = engine.compute_image_hash(img1)
-        hash2 = engine.compute_image_hash(img2)
-        hash3 = engine.compute_image_hash(img3)
-
-        self.assertEqual(hash1, hash2)
-        self.assertNotEqual(hash1, hash3)
+        # First call establishes baseline
+        self.assertTrue(engine.has_screen_changed(img1))
+        # Identical image should return False (no re-scan)
+        self.assertFalse(engine.has_screen_changed(img2))
+        # Changed image should return True (triggers scan)
+        self.assertTrue(engine.has_screen_changed(img3))
 
     def test_rapidocr_serbian_recognition(self):
         from PIL import Image, ImageDraw, ImageFont
