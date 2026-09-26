@@ -104,6 +104,13 @@ def is_potential_source_language(text: str, source_lang: str) -> bool:
 
         return False
 
+    if source_lang == "en":
+        # English text must contain Latin letters and NOT Cyrillic or CJK
+        has_latin = bool(re.search(r"[a-zA-Z]", cleaned))
+        has_cyrillic = bool(CYRILLIC_PATTERN.search(cleaned))
+        has_cjk = bool(CJK_PATTERN.search(cleaned))
+        return has_latin and not has_cyrillic and not has_cjk
+
     return True
 
 def translate_and_detect_lang(

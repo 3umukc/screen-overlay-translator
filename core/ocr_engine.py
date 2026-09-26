@@ -60,6 +60,106 @@ def is_text_in_source_lang(text: str, source_lang: str) -> bool:
     return bool(re.search(r"[a-zA-Z\u00C0-\u024F]", cleaned))
 
 
+def group_and_merge_ocr_blocks(
+    ocr_results: List[Any],
+    offset_x: int = 0,
+    offset_y: int = 0,
+    confidence_threshold: float = 0.35
+) -> List[Dict[str, Any]]:
+    """
+    Groups adjacent OCR text fragments on the same line into coherent sentences/phrases.
+    Merges their bounding boxes and combines text for natural, grammatical translation
+    rather than fragmented word-by-word literal pieces.
+    """
+    if not ocr_results:
+        return []
+
+    parsed = []
+    for dt_box, raw_text, score in ocr_results:
+        try:
+            score_val = float(score)
+        except (ValueError, TypeError):
+            score_val = 0.0
+
+        if score_val < confidence_threshold:
+            continue
+
+        text = raw_text.strip()
+        if not text or len(text) < 2:
+            continue
+
+        pts = np.array(dt_box, dtype=np.int32)
+        x_min = int(np.min(pts[:, 0])) + offset_x
+        y_min = int(np.min(pts[:, 1])) + offset_y
+        x_max = int(np.max(pts[:, 0])) + offset_x
+        y_max = int(np.max(pts[:, 1])) + offset_y
+        width = max(1, x_max - x_min)
+        height = max(1, y_max - y_min)
+
+        parsed.append({
+            "box": (x_min, y_min, width, height),
+            "x_min": x_min,
+            "y_min": y_min,
+            "x_max": x_max,
+            "y_max": y_max,
+            "w": width,
+            "h": height,
+            "y_center": y_min + height / 2.0,
+            "text": text,
+            "score": score_val
+        })
+
+    if not parsed:
+        return []
+
+    # Sort parsed blocks top-to-bottom, left-to-right
+    parsed.sort(key=lambda b: (b["y_min"], b["x_min"]))
+
+    lines = []
+    for block in parsed:
+        matched_line = None
+        for line in lines:
+            line_y_center = sum(b["y_center"] for b in line) / len(line)
+            avg_h = sum(b["h"] for b in line) / len(line)
+
+            # Check if on the same horizontal line (within 60% of line height)
+            if abs(block["y_center"] - line_y_center) < max(avg_h, block["h"]) * 0.6:
+                min_x = min(b["x_min"] for b in line)
+                max_x = max(b["x_max"] for b in line)
+                # Distance to line bounding box
+                gap = max(0, block["x_min"] - max_x, min_x - block["x_max"])
+                if gap < max(avg_h, block["h"]) * 3.0:
+                    matched_line = line
+                    break
+
+        if matched_line is not None:
+            matched_line.append(block)
+        else:
+            lines.append([block])
+
+    merged_blocks = []
+    for line in lines:
+        # Sort words in line strictly from left to right
+        line.sort(key=lambda b: b["x_min"])
+
+        merged_text = " ".join(b["text"] for b in line)
+        min_x = min(b["x_min"] for b in line)
+        min_y = min(b["y_min"] for b in line)
+        max_x = max(b["x_max"] for b in line)
+        max_y = max(b["y_max"] for b in line)
+        merged_w = max_x - min_x
+        merged_h = max_y - min_y
+        avg_score = sum(b["score"] for b in line) / len(line)
+
+        merged_blocks.append({
+            "box": (min_x, min_y, merged_w, merged_h),
+            "text": merged_text,
+            "score": avg_score
+        })
+
+    return merged_blocks
+
+
 class ScreenOcrEngine:
     """Handles screen capture via mss and fast on-device text detection via RapidOCR."""
 
@@ -147,34 +247,38 @@ class ScreenOcrEngine:
                 self._last_matched = []
                 return []
 
+            # Group adjacent word fragments on the same line into coherent semantic lines
+            merged_lines = group_and_merge_ocr_blocks(
+                ocr_results,
+                offset_x=offset_x,
+                offset_y=offset_y,
+                confidence_threshold=float(confidence_threshold)
+            )
+
             matched_blocks = []
             checked_count = 0
             candidate_count = 0
 
-            for dt_box, raw_text, score in ocr_results:
-                try:
-                    score_val = float(score)
-                except (ValueError, TypeError):
-                    score_val = 0.0
-
-                if score_val < float(confidence_threshold):
-                    continue
-
-                text = raw_text.strip()
-                if not text or len(text) < 2:
-                    continue
+            for line in merged_lines:
+                text = line["text"]
+                box = line["box"]
+                score_val = line["score"]
 
                 checked_count += 1
 
-                # Ultra-fast local prefilter: rejects Russian, English, symbols in 0ms without HTTP requests
+                # Ultra-fast local prefilter: rejects Russian, non-source, symbols in 0ms without HTTP requests
                 if config.get("ocr.filter_by_source_lang", True):
                     if not is_potential_source_language(text, source_lang):
                         continue
 
                 candidate_count += 1
 
-                # Translate and detect language
-                trans_text, detected_lang = translate_and_detect_lang(text, source_lang=source_lang, target_lang=target_lang)
+                # Translate the full coherent sentence/line with complete contextual meaning
+                trans_text, detected_lang = translate_and_detect_lang(
+                    text,
+                    source_lang=source_lang,
+                    target_lang=target_lang
+                )
                 if not trans_text:
                     continue
 
@@ -187,27 +291,15 @@ class ScreenOcrEngine:
                 if trans_text.lower().strip() == text.lower().strip():
                     continue
 
-                # Convert local coordinates to global screen coordinates
-                pts = np.array(dt_box, dtype=np.int32)
-                x_min = int(np.min(pts[:, 0])) + offset_x
-                y_min = int(np.min(pts[:, 1])) + offset_y
-                x_max = int(np.max(pts[:, 0])) + offset_x
-                y_max = int(np.max(pts[:, 1])) + offset_y
-                width = max(1, x_max - x_min)
-                height = max(1, y_max - y_min)
-
-                poly = [[int(pt[0]) + offset_x, int(pt[1]) + offset_y] for pt in dt_box]
-
                 matched_blocks.append({
-                    "box": (x_min, y_min, width, height),
-                    "polygon": poly,
+                    "box": box,
                     "src_text": text,
                     "trans_text": trans_text,
                     "detected_lang": detected_lang,
                     "score": score_val
                 })
 
-                print(f"[OCR Match] '{text}' -> '{trans_text}' (box: {x_min},{y_min},{width}x{height})")
+                print(f"[OCR Match] '{text}' -> '{trans_text}' (box: {box[0]},{box[1]},{box[2]}x{box[3]})")
 
             self._last_matched = matched_blocks
 
