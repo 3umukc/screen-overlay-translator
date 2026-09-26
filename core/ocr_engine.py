@@ -16,6 +16,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from config import config
 from core.translator import (
     translate_and_detect_lang,
+    batch_translate_and_detect_lang,
     matches_source_language,
     is_definitely_english,
     is_potential_source_language
@@ -140,13 +141,14 @@ def group_and_merge_ocr_blocks(
             line_y_center = sum(b["y_center"] for b in line) / len(line)
             avg_h = sum(b["h"] for b in line) / len(line)
 
-            # Check if on the same horizontal line (within 60% of line height)
-            if abs(block["y_center"] - line_y_center) < max(avg_h, block["h"]) * 0.6:
+            # Check if on the same horizontal line (within 50% of line height)
+            if abs(block["y_center"] - line_y_center) < max(avg_h, block["h"]) * 0.5:
                 min_x = min(b["x_min"] for b in line)
                 max_x = max(b["x_max"] for b in line)
                 # Distance to line bounding box
                 gap = max(0, block["x_min"] - max_x, min_x - block["x_max"])
-                if gap < max(avg_h, block["h"]) * 3.0:
+                # Word space threshold: ~1.2 of line height to keep phrases together without gluing buttons
+                if gap < max(avg_h, block["h"]) * 1.2:
                     matched_line = line
                     break
 
@@ -193,41 +195,58 @@ class ScreenOcrEngine:
         except Exception:
             pass
 
-        self._ocr = RapidOCR()
+        # Disable angle classifier for screen text (text is always horizontal)
+        self._ocr = RapidOCR(use_angle_cls=False)
 
-        # Limit detector inference resolution to 1280 max dimension
-        # This speeds up DBNet inference by ~18x on high-res / multi-monitor setups (e.g. 4480x1440)
-        # while keeping full coordinate precision and avoiding heavy CPU load
+        # Optimize detector resolution to 960 max dimension for ultra-fast detection
         try:
             if hasattr(self._ocr, "text_detector") and hasattr(self._ocr.text_detector, "preprocess_op"):
                 for op in self._ocr.text_detector.preprocess_op:
                     if hasattr(op, "limit_type"):
                         op.limit_type = "max"
-                        op.limit_side_len = 1280
+                        op.limit_side_len = 960
         except Exception as e:
             print(f"[OCR Engine] Warning: failed to configure detector resolution limit: {e}")
-        
-        # Load specialized Slavic recognition model (supports Cyrillic + Latin with high accuracy)
-        models_dir = Path(__file__).resolve().parent.parent / "models"
-        eslav_model = models_dir / "eslav_rec.onnx"
-        eslav_dict = models_dir / "eslav_dict.txt"
 
-        if eslav_model.exists() and eslav_dict.exists():
-            try:
-                rec_cfg = {
-                    'model_path': str(eslav_model),
-                    'keys_path': str(eslav_dict),
-                    'use_cuda': False,
-                    'rec_img_shape': [3, 48, 320],
-                    'rec_batch_num': 6
-                }
-                self._ocr.text_recognizer = TextRecognizer(rec_cfg)
-                print("[OCR Engine] Successfully loaded Slavic recognition model (eslav_rec.onnx)")
-            except Exception as e:
-                print(f"[OCR Engine] Warning: failed to load eslav model: {e}")
+        self._models_dir = Path(__file__).resolve().parent.parent / "models"
+        self._default_recognizer = self._ocr.text_recognizer
+        self._recognizers: Dict[str, Any] = {"default": self._default_recognizer}
 
         self._last_thumb = None
         self._last_matched: List[Dict[str, Any]] = []
+        # Pre-load eslav recognizer by default so Russian and Latin are both recognized cleanly
+        self._ocr.text_recognizer = self._get_recognizer_for_lang("auto")
+
+    def _get_recognizer_for_lang(self, source_lang: str):
+        """Loads and switches recognizer model dynamically based on source language."""
+        # eslav model supports BOTH Russian Cyrillic and English Latin accurately
+        target = "eslav"
+        if source_lang in ("zh", "ja", "ko"):
+            target = "default"
+
+        if target in self._recognizers:
+            return self._recognizers[target]
+
+        model_path = self._models_dir / f"{target}_rec.onnx"
+        dict_path = self._models_dir / f"{target}_dict.txt"
+        if model_path.exists() and dict_path.exists():
+            try:
+                # rec_batch_num=1 processes boxes directly at minimum width, avoiding heavy padding overhead
+                rec_cfg = {
+                    'model_path': str(model_path),
+                    'keys_path': str(dict_path),
+                    'use_cuda': False,
+                    'rec_img_shape': [3, 48, 320],
+                    'rec_batch_num': 1
+                }
+                rec = TextRecognizer(rec_cfg)
+                self._recognizers[target] = rec
+                print(f"[OCR Engine] Loaded {target} recognition model ({target}_rec.onnx)")
+                return rec
+            except Exception as e:
+                print(f"[OCR Engine] Failed to load {target} recognizer: {e}")
+
+        return self._default_recognizer
 
     def capture_image(self, zone: Optional[Tuple[int, int, int, int]] = None) -> Tuple[np.ndarray, int, int]:
         """
@@ -292,6 +311,8 @@ class ScreenOcrEngine:
                 # Screen unchanged: instantly reuse previous scan results, zero OCR load
                 return self._last_matched
 
+            self._ocr.text_recognizer = self._get_recognizer_for_lang(source_lang)
+
             t0 = time.time()
             ocr_results, _ = self._ocr(img)
             t_ocr = time.time() - t0
@@ -308,58 +329,53 @@ class ScreenOcrEngine:
                 confidence_threshold=float(confidence_threshold)
             )
 
-            matched_blocks = []
-            checked_count = 0
-            candidate_count = 0
-
+            candidate_blocks = []
             for line in merged_lines:
                 text = line["text"]
-                box = line["box"]
-                score_val = line["score"]
-
-                checked_count += 1
-
-                # Ultra-fast local prefilter: rejects Russian, non-source, symbols in 0ms without HTTP requests
                 if config.get("ocr.filter_by_source_lang", True):
-                    if not is_potential_source_language(text, source_lang):
+                    if not is_potential_source_language(text, source_lang, target_lang):
                         continue
+                candidate_blocks.append(line)
 
-                candidate_count += 1
+            if not candidate_blocks:
+                self._last_matched = []
+                return []
 
-                # Translate the full coherent sentence/line with complete contextual meaning
-                trans_text, detected_lang = translate_and_detect_lang(
-                    text,
-                    source_lang=source_lang,
-                    target_lang=target_lang
-                )
+            # Batch translate all candidate blocks in a single network request
+            candidate_texts = [b["text"] for b in candidate_blocks]
+            translations = batch_translate_and_detect_lang(
+                candidate_texts,
+                source_lang=source_lang,
+                target_lang=target_lang
+            )
+
+            matched_blocks = []
+            for line, (trans_text, detected_lang) in zip(candidate_blocks, translations):
                 if not trans_text:
                     continue
 
-                # Secondary strict verification
                 if config.get("ocr.filter_by_source_lang", True):
-                    if not matches_source_language(detected_lang, text, source_lang):
+                    if not matches_source_language(detected_lang, line["text"], source_lang):
                         continue
 
                 # Don't show overlay if translation is identical to source
-                if trans_text.lower().strip() == text.lower().strip():
+                if trans_text.lower().strip() == line["text"].lower().strip():
                     continue
 
                 matched_blocks.append({
-                    "box": box,
-                    "src_text": text,
+                    "box": line["box"],
+                    "src_text": line["text"],
                     "trans_text": trans_text,
                     "detected_lang": detected_lang,
-                    "score": score_val
+                    "score": line["score"]
                 })
 
-                print(f"[OCR Match] '{text}' -> '{trans_text}' (box: {box[0]},{box[1]},{box[2]}x{box[3]})")
+                print(f"[OCR Match] '{line['text']}' -> '{trans_text}' (box: {line['box'][0]},{line['box'][1]},{line['box'][2]}x{line['box'][3]})")
 
             self._last_matched = matched_blocks
 
             if matched_blocks:
-                print(f"[OCR] Found {len(matched_blocks)} translated block(s) in {t_ocr:.2f}s (candidates: {candidate_count}/{checked_count})")
-            elif candidate_count > 0:
-                print(f"[OCR] Checked {candidate_count} candidates, 0 translated blocks.")
+                print(f"[OCR] Found {len(matched_blocks)} translated block(s) in {t_ocr:.2f}s (candidates: {len(candidate_blocks)}/{len(merged_lines)})")
 
             return matched_blocks
         except Exception as e:
@@ -398,7 +414,7 @@ class ScreenOcrWorker(QObject):
                 self._scan_counter += 1
                 self._ensure_engine()
                 zone = config.get("ocr.zone", None)
-                src = config.get("source_lang", "sr")
+                src = config.get("source_lang", "auto")
                 tgt = config.get("target_lang", "ru")
                 conf = config.get("ocr.confidence_threshold", 0.35)
 
@@ -418,8 +434,8 @@ class ScreenOcrWorker(QObject):
         # Run on a background daemon thread so GUI never lags or freezes
         threading.Thread(target=_run, daemon=True).start()
 
-    def start_auto_scan(self, interval_ms: int = 1000):
-        """Starts periodic background scanning (1 second per tick)."""
+    def start_auto_scan(self, interval_ms: int = 400):
+        """Starts periodic background scanning."""
         self._timer.setInterval(interval_ms)
         self._timer.start()
 

@@ -4,17 +4,17 @@ from pathlib import Path
 from typing import Any, Dict
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "source_lang": "sr",
+    "source_lang": "auto",
     "target_lang": "ru",
     "ocr": {
         "auto_scan_enabled": True,
-        "interval_ms": 1000,
+        "interval_ms": 400,
         "zone": None,
         "font_size": 13,
-        "opacity": 0.92,
+        "opacity": 0.94,
         "filter_by_source_lang": True,
         "confidence_threshold": 0.35,
-        "auto_clear_ms": 3000
+        "auto_clear_ms": 3500
     },
     "hotkeys": {
         "scan": "Ctrl+Alt+S",
@@ -41,7 +41,15 @@ class ConfigManager:
         try:
             with open(self.config_file, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
+                # Reset legacy test values if present
+                if loaded.get("source_lang") == "sr":
+                    loaded["source_lang"] = "auto"
+                if loaded.get("ocr", {}).get("zone") == [398, 371, 725, 421]:
+                    loaded["ocr"]["zone"] = None
+                if loaded.get("ocr", {}).get("interval_ms") in (1000, 2000, 600):
+                    loaded["ocr"]["interval_ms"] = 400
                 self._data = self._deep_merge(dict(DEFAULT_CONFIG), loaded)
+                self.save()
         except Exception:
             self._data = dict(DEFAULT_CONFIG)
 

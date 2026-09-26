@@ -67,5 +67,27 @@ class TestScreenOcr(unittest.TestCase):
         recognized_texts = " ".join([b["src_text"] for b in blocks])
         self.assertTrue("витезови" in recognized_texts or "Српски" in recognized_texts or "Dobar" in recognized_texts)
 
+    def test_english_gaming_ui_translation(self):
+        from PIL import Image, ImageDraw, ImageFont
+        engine = ScreenOcrEngine()
+        font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 24)
+
+        img = Image.new("RGB", (800, 200), color=(255, 255, 255))
+        d = ImageDraw.Draw(img)
+        d.text((40, 40), "Attack speed +25 and armor +5", fill=(0, 0, 0), font=font)
+        d.text((40, 110), "Settings and Options", fill=(0, 0, 0), font=font)
+
+        img_bgr = np.array(img)[:, :, ::-1]
+        engine.capture_image = lambda zone=None: (img_bgr, 0, 0)
+
+        blocks = engine.process_screen(source_lang="en", target_lang="ru", force=True)
+        self.assertIsNotNone(blocks)
+        self.assertGreaterEqual(len(blocks), 2)
+
+        trans_texts = [b["trans_text"] for b in blocks]
+        # Verify bounding box and text accuracy
+        self.assertTrue(any("скорост" in t.lower() or "атак" in t.lower() or "брон" in t.lower() for t in trans_texts))
+        self.assertTrue(any("настройк" in t.lower() or "параметр" in t.lower() or "опци" in t.lower() for t in trans_texts))
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,7 @@ import urllib.request
 import urllib.parse
 import json
 import html
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
 
 # In-memory translation and language detection cache
 _translation_cache: Dict[str, Tuple[str, Optional[str]]] = {}
@@ -64,7 +64,16 @@ def is_definitely_english(text: str) -> bool:
         return True
     return False
 
-def is_potential_source_language(text: str, source_lang: str) -> bool:
+FILE_EXT_PATTERN = re.compile(
+    r"\.(py|json|jsonl|ps1|bat|cmd|sh|bin|exe|dll|txt|md|log|ini|cfg|yaml|yml|toml|cpp|c|h|hpp|rs|go|java|js|ts|html|css|zip|tar|gz|7z|png|jpg|jpeg|gif|svg|webp|ico|mp4|mkv|mp3|wav|ogg)$",
+    re.IGNORECASE
+)
+DATE_SIZE_PATTERN = re.compile(
+    r"^[\d\s\.,\:\/\-]+(?:\s*(?:kb|mb|gb|tb|kб|кб|мб|гб|тб|b|k|m|g|k6|к6|%)|\b)?$",
+    re.IGNORECASE
+)
+
+def is_potential_source_language(text: str, source_lang: str, target_lang: str = "ru") -> bool:
     """
     Ultra-fast 0ms local pre-filter to reject non-candidate phrases
     BEFORE making any HTTP requests to Google Translate.
@@ -72,11 +81,39 @@ def is_potential_source_language(text: str, source_lang: str) -> bool:
     cleaned = text.strip()
     if len(cleaned) < 2:
         return False
-    if not re.search(r"\w", cleaned):
+    # Must contain at least one letter
+    if not re.search(r"[a-zA-Z\u0400-\u04FF\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", cleaned):
         return False
 
+    # Skip pure dates, timestamps, memory/file sizes (e.g. "607 КБ", "25.09.2026 19:52", "100%")
+    if DATE_SIZE_PATTERN.match(cleaned):
+        return False
+
+    # Skip filenames with extensions (e.g. "train.py", "tokenizer.json", "test_wsl.ps1")
+    if FILE_EXT_PATTERN.search(cleaned):
+        return False
+
+    lower = cleaned.lower()
+
+    # If target language is Russian, ignore text that is already in Russian
+    if target_lang == "ru" and source_lang != "sr":
+        has_cyrillic = bool(CYRILLIC_PATTERN.search(lower))
+        has_latin = bool(re.search(r"[a-zA-Z]", lower))
+        # Pure Cyrillic without Latin is already Russian (e.g. "Дата изменения", "Размер", "Сценарий Windows")
+        if has_cyrillic and not has_latin:
+            return False
+
+    if source_lang == "auto":
+        return True
+
+    if source_lang == "en":
+        # English text must contain Latin letters and NOT Cyrillic or CJK
+        has_latin = bool(re.search(r"[a-zA-Z]", cleaned))
+        has_cyrillic = bool(CYRILLIC_PATTERN.search(cleaned))
+        has_cjk = bool(CJK_PATTERN.search(cleaned))
+        return has_latin and not has_cyrillic and not has_cjk
+
     if source_lang == "sr":
-        lower = cleaned.lower()
         if is_definitely_english(lower):
             return False
 
@@ -105,46 +142,111 @@ def is_potential_source_language(text: str, source_lang: str) -> bool:
 
         return False
 
-    if source_lang == "en":
-        # English text must contain Latin letters and NOT Cyrillic or CJK
-        has_latin = bool(re.search(r"[a-zA-Z]", cleaned))
-        has_cyrillic = bool(CYRILLIC_PATTERN.search(cleaned))
-        has_cjk = bool(CJK_PATTERN.search(cleaned))
-        return has_latin and not has_cyrillic and not has_cjk
-
     return True
 
-def translate_and_detect_lang(
-    text: str,
+def batch_translate_and_detect_lang(
+    texts: List[str],
+    source_lang: str = "auto",
+    target_lang: str = "ru"
+) -> List[Tuple[Optional[str], Optional[str]]]:
+    """
+    Translates multiple phrases in a SINGLE HTTP request using newline joining.
+    Dramatically reduces network overhead, latency, and prevents Google 429 rate limits.
+    """
+    if not texts:
+        return []
+
+    results: List[Optional[Tuple[Optional[str], Optional[str]]]] = [None] * len(texts)
+    uncached_indices: List[int] = []
+    uncached_texts: List[str] = []
+
+    for i, t in enumerate(texts):
+        cleaned = t.strip()
+        if not cleaned or len(cleaned) < 2:
+            results[i] = (None, None)
+            continue
+
+        cache_key = f"{source_lang}:{target_lang}:{cleaned}"
+        if cache_key in _translation_cache:
+            results[i] = _translation_cache[cache_key]
+        else:
+            uncached_indices.append(i)
+            # Replace inner newlines to keep line structure intact
+            uncached_texts.append(cleaned.replace("\n", " "))
+
+    if not uncached_texts:
+        return [r if r is not None else (None, None) for r in results]
+
+    # Process uncached texts in batches of up to 25 items
+    batch_size = 25
+    for b_start in range(0, len(uncached_texts), batch_size):
+        b_indices = uncached_indices[b_start:b_start + batch_size]
+        b_texts = uncached_texts[b_start:b_start + batch_size]
+        joined = "\n".join(b_texts)
+
+        try:
+            q = urllib.parse.quote(joined)
+            sl_param = "auto" if source_lang == "auto" else source_lang
+            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl_param}&tl={target_lang}&dt=t&q={q}"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": "*/*"
+                }
+            )
+            with urllib.request.urlopen(req, timeout=3.5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                full_translated = "".join([part[0] for part in data[0] if part and part[0]])
+
+                detected_lang = None
+                if len(data) > 2 and isinstance(data[2], str):
+                    detected_lang = data[2].lower()
+                elif len(data) > 8 and data[8] and data[8][0]:
+                    detected_lang = str(data[8][0][0]).lower()
+
+                split_translated = full_translated.split("\n")
+                if len(split_translated) == len(b_texts):
+                    for orig_idx, orig_text, trans in zip(b_indices, b_texts, split_translated):
+                        trans_clean = trans.strip()
+                        cache_key = f"{source_lang}:{target_lang}:{orig_text}"
+                        res_tuple = (trans_clean, detected_lang)
+                        _translation_cache[cache_key] = res_tuple
+                        results[orig_idx] = res_tuple
+                else:
+                    # Mismatch in line count, translate individually for this batch
+                    for orig_idx, orig_text in zip(b_indices, b_texts):
+                        tr, det = _translate_single(orig_text, source_lang, target_lang)
+                        results[orig_idx] = (tr, det)
+        except Exception:
+            for orig_idx, orig_text in zip(b_indices, b_texts):
+                tr, det = _translate_single(orig_text, source_lang, target_lang)
+                results[orig_idx] = (tr, det)
+
+    return [r if r is not None else (None, None) for r in results]
+
+def _translate_single(
+    cleaned: str,
     source_lang: str = "auto",
     target_lang: str = "ru"
 ) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Translates text and detects its source language using Google GTX endpoint with caching.
-    Uses sl=auto to allow true language detection.
-    Returns: (translated_text, detected_source_lang)
-    """
-    cleaned = text.strip()
-    if not cleaned or len(cleaned) < 2:
-        return None, None
-
-    # If user selected Serbian and the text is definitely English, skip network request
-    if source_lang == "sr" and is_definitely_english(cleaned):
-        return None, "en"
-
-    cache_key = f"{target_lang}:{cleaned}"
+    """Single phrase translation fallback."""
+    cache_key = f"{source_lang}:{target_lang}:{cleaned}"
     if cache_key in _translation_cache:
         return _translation_cache[cache_key]
 
     try:
         q = urllib.parse.quote(cleaned)
-        # Always use sl=auto so Google detects the true language of the snippet
-        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={target_lang}&dt=t&q={q}"
+        sl_param = "auto" if source_lang == "auto" else source_lang
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl_param}&tl={target_lang}&dt=t&q={q}"
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "*/*"
+            }
         )
-        with urllib.request.urlopen(req, timeout=2.0) as resp:
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             translated = "".join([part[0] for part in data[0] if part and part[0]]).strip()
 
@@ -157,7 +259,7 @@ def translate_and_detect_lang(
             _translation_cache[cache_key] = (translated, detected_lang)
             return translated, detected_lang
     except Exception:
-        # Fallback 1: MyMemory API (handles cases when Google returns 429 rate limit)
+        # Fallback 1: MyMemory API
         try:
             eff_sl = source_lang
             if eff_sl == "auto":
@@ -169,7 +271,7 @@ def translate_and_detect_lang(
             mm_url = f"https://api.mymemory.translated.net/get?q={q}&langpair={eff_sl}|{target_lang}"
             mm_req = urllib.request.Request(
                 mm_url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                headers={"User-Agent": "Mozilla/5.0"}
             )
             with urllib.request.urlopen(mm_req, timeout=2.5) as mm_resp:
                 mm_data = json.loads(mm_resp.read().decode("utf-8"))
@@ -186,6 +288,15 @@ def translate_and_detect_lang(
         local_trans = translate_phrase_or_tokens(cleaned, sl=source_lang, tl=target_lang)
         detected = detect_language_heuristic(cleaned)
         return local_trans, detected
+
+def translate_and_detect_lang(
+    text: str,
+    source_lang: str = "auto",
+    target_lang: str = "ru"
+) -> Tuple[Optional[str], Optional[str]]:
+    """Convenience wrapper for single phrase translation."""
+    res = batch_translate_and_detect_lang([text], source_lang=source_lang, target_lang=target_lang)
+    return res[0] if res else (None, None)
 
 def detect_language_heuristic(text: str) -> str:
     """Fast offline heuristic language detection."""
@@ -232,7 +343,7 @@ def matches_source_language(
 
     if target_source_lang == "auto":
         # Don't translate if already in Russian / target language
-        return detected_lang != "ru"
+        return detected_lang not in ("ru", "rus")
 
     # Specific handling for Serbian ('sr')
     if target_source_lang == "sr":

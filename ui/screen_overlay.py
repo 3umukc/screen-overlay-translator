@@ -19,11 +19,18 @@ class OverlayBlock:
         self.last_seen = time.time()
 
     def update_box(self, new_box: tuple):
-        # Position smoothing
-        self.box[0] = int(0.7 * self.box[0] + 0.3 * new_box[0])
-        self.box[1] = int(0.7 * self.box[1] + 0.3 * new_box[1])
-        self.box[2] = int(0.7 * self.box[2] + 0.3 * new_box[2])
-        self.box[3] = int(0.7 * self.box[3] + 0.3 * new_box[3])
+        # Subtle smoothing for minor subpixel jitter (<=4px).
+        # When text moves or resizes, update position immediately so overlay never lags behind.
+        dx = abs(self.box[0] - new_box[0])
+        dy = abs(self.box[1] - new_box[1])
+        if dx <= 4 and dy <= 4:
+            self.box[0] = int(0.2 * self.box[0] + 0.8 * new_box[0])
+            self.box[1] = int(0.2 * self.box[1] + 0.8 * new_box[1])
+        else:
+            self.box[0] = new_box[0]
+            self.box[1] = new_box[1]
+        self.box[2] = new_box[2]
+        self.box[3] = new_box[3]
         self.last_seen = time.time()
 
 class ScreenOverlayWindow(QWidget):
@@ -86,12 +93,14 @@ class ScreenOverlayWindow(QWidget):
             if not trans:
                 continue
 
-            # Look for existing matching block nearby
+            # Look for existing matching block nearby with matching content
             found = False
             for existing in self._active_blocks:
                 dist_x = abs(existing.box[0] - box[0])
                 dist_y = abs(existing.box[1] - box[1])
-                if dist_x < 35 and dist_y < 25:
+                same_text = (existing.src_text.lower() == src.lower())
+
+                if (same_text and dist_x < 50 and dist_y < 30) or (dist_x < 15 and dist_y < 12):
                     existing.update_box(box)
                     existing.src_text = src
                     existing.trans_text = trans
@@ -135,16 +144,16 @@ class ScreenOverlayWindow(QWidget):
         self.update()
         self.hide()
 
-    def show_test_pill(self, text: str = "Тестовый оверлей: Dobar dan -> Добрый день"):
+    def show_test_pill(self, text: str = "Тестовый оверлей: Options -> Настройки"):
         """Displays a test translation pill in the center of the primary monitor."""
         screen_geo = QApplication.primaryScreen().geometry()
         cx = screen_geo.x() + screen_geo.width() // 2 - 160
         cy = screen_geo.y() + screen_geo.height() // 2 - 20
         self.update_blocks([{
             "box": (cx, cy, 320, 36),
-            "src_text": "Dobar dan",
+            "src_text": "Options",
             "trans_text": text,
-            "detected_lang": "sr",
+            "detected_lang": "en",
             "score": 0.99
         }])
 
@@ -159,6 +168,10 @@ class ScreenOverlayWindow(QWidget):
         screen_w = self.width()
         screen_h = self.height()
 
+        # Window origin in global screen coordinates to support multi-monitor setups
+        origin_x = self.geometry().x()
+        origin_y = self.geometry().y()
+
         opacity = config.get("ocr.opacity", 0.94)
         alpha = int(opacity * 255)
         # Google Lens style dark patch
@@ -172,13 +185,17 @@ class ScreenOverlayWindow(QWidget):
             if not trans_text:
                 continue
 
+            # Convert global screen coordinates to widget-relative coordinates
+            rel_x = float(bx - origin_x)
+            rel_y = float(by - origin_y)
+
             # Fit font size to the detected text line height
-            font_size = max(11, min(int(bh * 0.72), 24))
+            font_size = max(10, min(int(bh * 0.70), 22))
             font = QFont("Segoe UI", font_size, QFont.Weight.Medium)
             painter.setFont(font)
             fm = QFontMetrics(font)
 
-            pad_x = 4
+            pad_x = 5
             pad_y = 2
 
             text_w = fm.horizontalAdvance(trans_text)
@@ -188,8 +205,9 @@ class ScreenOverlayWindow(QWidget):
             patch_w = max(float(bw), float(text_w)) + pad_x * 2
             patch_h = max(float(bh), float(text_h)) + pad_y * 2
 
-            patch_x = float(bx) - pad_x
-            patch_y = float(by) - pad_y
+            patch_x = rel_x - pad_x
+            # Center patch vertically over the recognized word line so it covers it cleanly
+            patch_y = rel_y - (patch_h - float(bh)) / 2.0
 
             # Keep strictly within screen bounds
             if patch_x < 0:
@@ -207,7 +225,7 @@ class ScreenOverlayWindow(QWidget):
             # Draw dark background patch masking original text
             painter.setPen(border_pen)
             painter.setBrush(bg_brush)
-            painter.drawRoundedRect(patch_rect, 3.5, 3.5)
+            painter.drawRoundedRect(patch_rect, 4.0, 4.0)
 
             # Draw white translated text centered vertically
             text_rect = QRectF(
