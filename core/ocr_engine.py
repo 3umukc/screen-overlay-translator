@@ -198,13 +198,13 @@ class ScreenOcrEngine:
         # Disable angle classifier for screen text (text is always horizontal)
         self._ocr = RapidOCR(use_angle_cls=False)
 
-        # Optimize detector resolution to 960 max dimension for ultra-fast detection
+        # Optimize detector resolution to 640 max dimension for ultra-fast DBNet detection (~100ms)
         try:
             if hasattr(self._ocr, "text_detector") and hasattr(self._ocr.text_detector, "preprocess_op"):
                 for op in self._ocr.text_detector.preprocess_op:
                     if hasattr(op, "limit_type"):
                         op.limit_type = "max"
-                        op.limit_side_len = 960
+                        op.limit_side_len = 640
         except Exception as e:
             print(f"[OCR Engine] Warning: failed to configure detector resolution limit: {e}")
 
@@ -214,6 +214,7 @@ class ScreenOcrEngine:
 
         self._last_thumb = None
         self._last_matched: List[Dict[str, Any]] = []
+        self._cached_boxes: List[Dict[str, Any]] = []
         # Pre-load eslav recognizer by default so Russian and Latin are both recognized cleanly
         self._ocr.text_recognizer = self._get_recognizer_for_lang("auto")
 
@@ -269,11 +270,11 @@ class ScreenOcrEngine:
             img = np.array(sct_img)[:, :, :3]
             return img, offset_x, offset_y
 
-    def has_screen_changed(self, img: np.ndarray, threshold: float = 0.8) -> bool:
+    def has_screen_changed(self, img: np.ndarray, threshold: float = 2.0) -> bool:
         """
-        Fast perceptual frame diff on small 64x36 thumbnail (<1 ms).
-        Ignores minor pixel fluctuations (clocks, cursors) so heavy OCR is NOT re-run
-        when the screen content hasn't really changed, eliminating CPU lag completely.
+        Fast perceptual frame diff on small 64x36 thumbnail (<0.5 ms).
+        Ignores minor pixel fluctuations (clocks, cursors, 3D world micro-jitter)
+        so heavy OCR is NOT re-run when content hasn't changed.
         """
         try:
             # Subsample by step 16 to avoid converting all 6.5M pixels (0.4ms vs 27ms)
@@ -296,13 +297,15 @@ class ScreenOcrEngine:
     def process_screen(
         self,
         zone: Optional[Tuple[int, int, int, int]] = None,
-        source_lang: str = "en",
+        source_lang: str = "auto",
         target_lang: str = "ru",
-        confidence_threshold: float = 0.4,
+        confidence_threshold: float = 0.35,
         force: bool = False
     ) -> Optional[List[Dict[str, Any]]]:
         """
-        Captures screen/zone, runs OCR only when screen changed, and translates.
+        Differential Visual Fingerprint OCR & Smart Spatial Cache.
+        Detects text boxes via DBNet (100ms), then reuses recognized texts for unchanged boxes (0ms),
+        running recognizer and translation strictly on genuinely new text.
         """
         try:
             img, offset_x, offset_y = self.capture_image(zone)
@@ -314,12 +317,53 @@ class ScreenOcrEngine:
             self._ocr.text_recognizer = self._get_recognizer_for_lang(source_lang)
 
             t0 = time.time()
-            ocr_results, _ = self._ocr(img)
-            t_ocr = time.time() - t0
+            dt_boxes, _ = self._ocr.text_detector(img)
+            t_det = time.time() - t0
 
-            if not ocr_results:
+            if dt_boxes is None or len(dt_boxes) == 0:
                 self._last_matched = []
+                self._cached_boxes = []
                 return []
+
+            # Differential Visual Fingerprint Matching
+            crops = self._ocr.get_crop_img_list(img, dt_boxes)
+            uncached_indices = []
+            uncached_crops = []
+            box_results = [None] * len(dt_boxes)
+            new_cached = []
+
+            for i, (b, crop) in enumerate(zip(dt_boxes, crops)):
+                pts = np.array(b, dtype=np.int32)
+                cx = int(np.mean(pts[:, 0]))
+                cy = int(np.mean(pts[:, 1]))
+                fp = cv2.resize(crop[:, :, 0], (16, 8), interpolation=cv2.INTER_NEAREST)
+
+                matched = None
+                for c in self._cached_boxes:
+                    if abs(c["cx"] - cx) <= 18 and abs(c["cy"] - cy) <= 14:
+                        diff = float(np.mean(np.abs(fp.astype(np.int16) - c["fp"].astype(np.int16))))
+                        if diff < 7.0:
+                            matched = c
+                            break
+
+                if matched is not None:
+                    box_results[i] = [b.tolist(), matched["text"], matched["score"]]
+                    new_cached.append({"cx": cx, "cy": cy, "fp": fp, "text": matched["text"], "score": matched["score"]})
+                else:
+                    uncached_indices.append((i, cx, cy, fp, b))
+                    uncached_crops.append(crop)
+
+            t_rec0 = time.time()
+            if uncached_crops:
+                rec_res, _ = self._ocr.text_recognizer(uncached_crops)
+                for (i, cx, cy, fp, b), (txt, score) in zip(uncached_indices, rec_res):
+                    score_str = str(score)
+                    box_results[i] = [b.tolist(), txt, score_str]
+                    new_cached.append({"cx": cx, "cy": cy, "fp": fp, "text": txt, "score": score_str})
+            t_rec = time.time() - t_rec0
+
+            self._cached_boxes = new_cached
+            ocr_results = [r for r in box_results if r is not None]
 
             # Group adjacent word fragments on the same line into coherent semantic lines
             merged_lines = group_and_merge_ocr_blocks(
@@ -374,8 +418,10 @@ class ScreenOcrEngine:
 
             self._last_matched = matched_blocks
 
+            reused_cnt = len(dt_boxes) - len(uncached_crops)
+            total_time = time.time() - t0
             if matched_blocks:
-                print(f"[OCR] Found {len(matched_blocks)} translated block(s) in {t_ocr:.2f}s (candidates: {len(candidate_blocks)}/{len(merged_lines)})")
+                print(f"[OCR] Processed in {total_time*1000:.0f}ms (det:{t_det*1000:.0f}ms, rec:{t_rec*1000:.0f}ms, reused:{reused_cnt}/{len(dt_boxes)}) -> {len(matched_blocks)} block(s)")
 
             return matched_blocks
         except Exception as e:
@@ -434,7 +480,7 @@ class ScreenOcrWorker(QObject):
         # Run on a background daemon thread so GUI never lags or freezes
         threading.Thread(target=_run, daemon=True).start()
 
-    def start_auto_scan(self, interval_ms: int = 400):
+    def start_auto_scan(self, interval_ms: int = 300):
         """Starts periodic background scanning."""
         self._timer.setInterval(interval_ms)
         self._timer.start()

@@ -8,7 +8,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "target_lang": "ru",
     "ocr": {
         "auto_scan_enabled": True,
-        "interval_ms": 400,
+        "interval_ms": 300,
         "zone": None,
         "font_size": 13,
         "opacity": 0.94,
@@ -46,8 +46,8 @@ class ConfigManager:
                     loaded["source_lang"] = "auto"
                 if loaded.get("ocr", {}).get("zone") == [398, 371, 725, 421]:
                     loaded["ocr"]["zone"] = None
-                if loaded.get("ocr", {}).get("interval_ms") in (1000, 2000, 600):
-                    loaded["ocr"]["interval_ms"] = 400
+                if loaded.get("ocr", {}).get("interval_ms") in (1000, 2000, 600, 400):
+                    loaded["ocr"]["interval_ms"] = 300
                 self._data = self._deep_merge(dict(DEFAULT_CONFIG), loaded)
                 self.save()
         except Exception:

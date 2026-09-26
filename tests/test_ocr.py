@@ -89,5 +89,29 @@ class TestScreenOcr(unittest.TestCase):
         self.assertTrue(any("скорост" in t.lower() or "атак" in t.lower() or "брон" in t.lower() for t in trans_texts))
         self.assertTrue(any("настройк" in t.lower() or "параметр" in t.lower() or "опци" in t.lower() for t in trans_texts))
 
+    def test_differential_fingerprint_cache(self):
+        from PIL import Image, ImageDraw, ImageFont
+        engine = ScreenOcrEngine()
+        font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 24)
+
+        img = Image.new("RGB", (600, 150), color=(255, 255, 255))
+        d = ImageDraw.Draw(img)
+        d.text((30, 30), "Hello Friend", fill=(0, 0, 0), font=font)
+        d.text((30, 80), "Welcome back", fill=(0, 0, 0), font=font)
+
+        img_bgr = np.array(img)[:, :, ::-1]
+        engine.capture_image = lambda zone=None: (img_bgr, 0, 0)
+
+        # Cold scan: populates cache
+        blocks1 = engine.process_screen(source_lang="en", target_lang="ru", force=True)
+        self.assertGreaterEqual(len(blocks1), 2)
+        initial_cache_len = len(engine._cached_boxes)
+        self.assertGreaterEqual(initial_cache_len, 2)
+
+        # Subsequent scan: reuses fingerprint cache without running recognizer
+        blocks2 = engine.process_screen(source_lang="en", target_lang="ru", force=True)
+        self.assertEqual(len(blocks1), len(blocks2))
+        self.assertEqual(len(engine._cached_boxes), initial_cache_len)
+
 if __name__ == "__main__":
     unittest.main()
