@@ -102,12 +102,15 @@ class ScreenOverlayWindow(QWidget):
             if not found:
                 self._active_blocks.append(OverlayBlock(box, src, trans, detected))
 
+        if raw_blocks:
+            print(f"[Overlay] Updated: {len(self._active_blocks)} active translation block(s) on screen.")
+
         self._purge_expired_blocks()
 
     def _purge_expired_blocks(self):
         """Removes blocks that haven't been re-detected within the lifespan threshold."""
         now = time.time()
-        lifespan = config.get("ocr.auto_clear_ms", 3000) / 1000.0
+        lifespan = config.get("ocr.auto_clear_ms", 3500) / 1000.0
 
         alive = []
         for block in self._active_blocks:
@@ -120,6 +123,7 @@ class ScreenOverlayWindow(QWidget):
         if self._active_blocks:
             if not self.isVisible():
                 self.show()
+                self.raise_()
                 self._enable_click_through()
         else:
             if self.isVisible():

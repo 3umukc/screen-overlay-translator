@@ -90,6 +90,7 @@ class ScreenOcrEngine:
     def capture_image(self, zone: Optional[Tuple[int, int, int, int]] = None) -> Tuple[np.ndarray, int, int]:
         """
         Captures screen or specific zone safely within the calling thread.
+        Covers all monitors (virtual desktop) by default so any window is caught.
         Returns: (image_bgr_numpy, offset_x, offset_y)
         """
         with mss.mss() as sct:
@@ -98,8 +99,8 @@ class ScreenOcrEngine:
                 monitor = {"top": int(y), "left": int(x), "width": int(w), "height": int(h)}
                 offset_x, offset_y = int(x), int(y)
             else:
-                # Capture primary monitor (faster and avoids multi-monitor desktop clutter)
-                mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                # Capture full virtual desktop (monitors[0]) to support multi-monitor setups
+                mon = sct.monitors[0]
                 monitor = {"top": mon["top"], "left": mon["left"], "width": mon["width"], "height": mon["height"]}
                 offset_x, offset_y = mon["left"], mon["top"]
 
@@ -131,17 +132,25 @@ class ScreenOcrEngine:
             img_hash = self.compute_image_hash(img)
 
             if not force and img_hash == self._last_hash:
-                # Frame content is identical, skip OCR processing
+                # If frame is identical and we had active blocks, refresh them so they don't disappear
+                if getattr(self, "_last_matched", None):
+                    return self._last_matched
                 return None
 
             self._last_hash = img_hash
 
-            # Run RapidOCR inference
+            t0 = time.time()
             ocr_results, _ = self._ocr(img)
+            t_ocr = time.time() - t0
+
             if not ocr_results:
+                self._last_matched = []
                 return []
 
             matched_blocks = []
+            checked_count = 0
+            candidate_count = 0
+
             for dt_box, raw_text, score in ocr_results:
                 try:
                     score_val = float(score)
@@ -155,10 +164,14 @@ class ScreenOcrEngine:
                 if not text or len(text) < 2:
                     continue
 
+                checked_count += 1
+
                 # Ultra-fast local prefilter: rejects Russian, English, symbols in 0ms without HTTP requests
                 if config.get("ocr.filter_by_source_lang", True):
                     if not is_potential_source_language(text, source_lang):
                         continue
+
+                candidate_count += 1
 
                 # Translate and detect language
                 trans_text, detected_lang = translate_and_detect_lang(text, source_lang=source_lang, target_lang=target_lang)
@@ -194,6 +207,15 @@ class ScreenOcrEngine:
                     "score": score_val
                 })
 
+                print(f"[OCR Match] '{text}' -> '{trans_text}' (box: {x_min},{y_min},{width}x{height})")
+
+            self._last_matched = matched_blocks
+
+            if matched_blocks:
+                print(f"[OCR] Found {len(matched_blocks)} translated block(s) in {t_ocr:.2f}s (candidates: {candidate_count}/{checked_count})")
+            elif candidate_count > 0:
+                print(f"[OCR] Checked {candidate_count} candidates, 0 translated blocks.")
+
             return matched_blocks
         except Exception as e:
             print(f"[OCR Engine] Error processing screen: {e}")
@@ -213,6 +235,7 @@ class ScreenOcrWorker(QObject):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_auto_tick)
         self._is_busy = False
+        self._scan_counter = 0
 
     def _ensure_engine(self):
         if self._engine is None:
@@ -227,6 +250,7 @@ class ScreenOcrWorker(QObject):
 
         def _run():
             try:
+                self._scan_counter += 1
                 self._ensure_engine()
                 zone = config.get("ocr.zone", None)
                 src = config.get("source_lang", "sr")
