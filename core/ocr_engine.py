@@ -9,7 +9,7 @@ from rapidocr_onnxruntime import RapidOCR
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 
 from config import config
-from core.translator import translate_and_detect_lang, matches_source_language
+from core.translator import translate_and_detect_lang, matches_source_language, is_definitely_english
 
 def is_text_in_source_lang(text: str, source_lang: str) -> bool:
     """
@@ -131,11 +131,20 @@ class ScreenOcrEngine:
 
             matched_blocks = []
             for dt_box, raw_text, score in ocr_results:
-                if score < confidence_threshold:
+                try:
+                    score_val = float(score)
+                except (ValueError, TypeError):
+                    score_val = 0.0
+
+                if score_val < float(confidence_threshold):
                     continue
 
                 text = raw_text.strip()
                 if not text or len(text) < 2:
+                    continue
+
+                # Fast local filter: if Serbian is chosen and text is definitely English, skip immediately
+                if source_lang == "sr" and is_definitely_english(text):
                     continue
 
                 # Translate and detect language
@@ -169,7 +178,7 @@ class ScreenOcrEngine:
                     "src_text": text,
                     "trans_text": trans_text,
                     "detected_lang": detected_lang,
-                    "score": float(score)
+                    "score": score_val
                 })
 
             return matched_blocks
