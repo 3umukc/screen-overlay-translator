@@ -70,8 +70,8 @@ class ScreenOcrEngine:
             monitor = {"top": int(y), "left": int(x), "width": int(w), "height": int(h)}
             offset_x, offset_y = int(x), int(y)
         else:
-            # Capture primary monitor
-            mon = self._sct.monitors[1]
+            # Capture all monitors (full virtual desktop: monitors[0])
+            mon = self._sct.monitors[0]
             monitor = {"top": mon["top"], "left": mon["left"], "width": mon["width"], "height": mon["height"]}
             offset_x, offset_y = mon["left"], mon["top"]
 

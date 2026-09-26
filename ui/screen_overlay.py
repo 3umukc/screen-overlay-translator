@@ -129,6 +129,19 @@ class ScreenOverlayWindow(QWidget):
         self.update()
         self.hide()
 
+    def show_test_pill(self, text: str = "Тестовый оверлей: Dobar dan -> Добрый день"):
+        """Displays a test translation pill in the center of the primary monitor."""
+        screen_geo = QApplication.primaryScreen().geometry()
+        cx = screen_geo.x() + screen_geo.width() // 2 - 160
+        cy = screen_geo.y() + screen_geo.height() // 2 - 40
+        self.update_blocks([{
+            "box": (cx, cy, 320, 45),
+            "src_text": "Dobar dan",
+            "trans_text": text,
+            "detected_lang": "sr",
+            "score": 0.99
+        }])
+
     def paintEvent(self, event):
         if not self._active_blocks:
             return

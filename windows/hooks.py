@@ -11,6 +11,7 @@ WM_SYSKEYDOWN = 0x0104
 VK_S = 0x53
 VK_O = 0x4F
 VK_Z = 0x5A
+VK_T = 0x54
 VK_CONTROL = 0x11
 VK_LCONTROL = 0xA2
 VK_RCONTROL = 0xA3
@@ -49,11 +50,13 @@ class HotkeyWorker(QObject):
     - Ctrl + Alt + S: Trigger single screen scan & translation
     - Ctrl + Alt + Z: Open interactive screen zone selector
     - Ctrl + Alt + O: Toggle real-time background auto-scan
+    - Ctrl + Alt + T: Show test overlay pill
     """
 
     scan_triggered = pyqtSignal()
     select_zone_triggered = pyqtSignal()
     toggle_auto_triggered = pyqtSignal()
+    test_overlay_triggered = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -88,6 +91,9 @@ class HotkeyWorker(QObject):
                         return 1
                     elif vk == VK_O:
                         self.toggle_auto_triggered.emit()
+                        return 1
+                    elif vk == VK_T:
+                        self.test_overlay_triggered.emit()
                         return 1
         except Exception:
             pass

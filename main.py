@@ -52,6 +52,7 @@ class ScreenOverlayApp:
         self.hotkey_worker.scan_triggered.connect(self.trigger_scan)
         self.hotkey_worker.select_zone_triggered.connect(self.start_zone_selection)
         self.hotkey_worker.toggle_auto_triggered.connect(self.toggle_auto_scan)
+        self.hotkey_worker.test_overlay_triggered.connect(self.show_test_pill)
 
         self.hook_thread = threading.Thread(target=self.hotkey_worker.start_hook, daemon=True)
         self.hook_thread.start()
@@ -80,6 +81,9 @@ class ScreenOverlayApp:
 
         self.zone_action = menu.addAction("Выбрать зону экрана (Ctrl+Alt+Z)")
         self.zone_action.triggered.connect(self.start_zone_selection)
+
+        test_action = menu.addAction("Проверить оверлей (Ctrl+Alt+T)")
+        test_action.triggered.connect(self.show_test_pill)
 
         menu.addSeparator()
 
@@ -144,6 +148,9 @@ class ScreenOverlayApp:
         else:
             self.ocr_worker.stop_auto_scan()
 
+    def show_test_pill(self, text: str = "Тестовый оверлей: Dobar dan -> Добрый день"):
+        self.screen_overlay.show_test_pill(text)
+
     def quit_app(self):
         self.ocr_worker.stop_auto_scan()
         self.screen_overlay.close()
@@ -154,6 +161,8 @@ class ScreenOverlayApp:
     def run(self):
         src = config.get("source_lang", "sr").upper()
         tgt = config.get("target_lang", "ru").upper()
+        # Show welcome test pill for 3.5 seconds so user immediately sees the overlay
+        self.show_test_pill(f"Экранный переводчик активен [{src} -> {tgt}]. Нажмите Ctrl+Alt+T для проверки.")
         self.tray.showMessage(
             "Экранный переводчик",
             f"Автосканирование активно: распознает {src} и переводит на {tgt} в реальном времени без скриншотов.",
