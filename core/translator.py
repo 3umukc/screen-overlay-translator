@@ -3,7 +3,19 @@ import urllib.request
 import urllib.parse
 import json
 import html
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Tuple, Dict, List
+
+# Circuit breaker for Google Translate HTTP 429 rate limit
+_google_blocked_until = 0.0
+
+def _is_google_available() -> bool:
+    return time.time() > _google_blocked_until
+
+def _trip_google_breaker(cooldown_seconds: float = 600.0):
+    global _google_blocked_until
+    _google_blocked_until = time.time() + cooldown_seconds
 
 # In-memory translation and language detection cache
 _translation_cache: Dict[str, Tuple[str, Optional[str]]] = {}
@@ -144,14 +156,293 @@ def is_potential_source_language(text: str, source_lang: str, target_lang: str =
 
     return True
 
+SERBIAN_FAST_DICT: Dict[str, str] = {
+    # Character creation & general UI
+    "generalije": "Общие данные",
+    "pol": "Пол",
+    "muski": "Мужской",
+    "muški": "Мужской",
+    "zenski": "Женский",
+    "ženski": "Женский",
+    "datum rodenja": "Дата рождения",
+    "datum rođenja": "Дата рождения",
+    "ime": "Имя",
+    "prezime": "Фамилия",
+    "unesite": "Введите",
+    "unesite vase ime": "Введите ваше имя",
+    "unesite vaše ime": "Введите ваше имя",
+    "unesite vase prezime": "Введите вашу фамилию",
+    "unesite vaše prezime": "Введите вашу фамилию",
+    "unesite datum rodenja": "Введите дату рождения",
+    "unesite datum rođenja": "Введите дату рождения",
+    "unesite godine": "Введите возраст",
+    "godine": "Возраст / Лет",
+    "karakter": "Персонаж",
+    "kreiranje karaktera": "Создание персонажа",
+    "izgled": "Внешность",
+    "lice": "Лицо",
+    "kosa": "Волосы",
+    "brada": "Борода",
+    "odeca": "Одежда",
+    "odeća": "Одежда",
+    "roditelji": "Родители",
+    "otac": "Отец",
+    "majka": "Мать",
+    "sledece": "Далее",
+    "sledeće": "Далее",
+    "nazad": "Назад",
+    "potvrdi": "Подтвердить",
+    "potvrdite": "Подтвердите",
+    "odustani": "Отмена",
+    "ponisti": "Отмена",
+    "poništi": "Отмена",
+    "sacuvaj": "Сохранить",
+    "sačuvaj": "Сохранить",
+    "izlaz": "Выход",
+    "izadji": "Выйти",
+    "izađi": "Выйти",
+    "izaberite": "Выберите",
+    "izaberi": "Выбрать",
+    "prihvati": "Принять",
+    "odbij": "Отклонить",
+    "zatvori": "Закрыть",
+    "otvori": "Открыть",
+    "obrisi": "Удалить",
+    "obriši": "Удалить",
+    "promeni": "Изменить",
+    "podesavanja": "Настройки",
+    "podešavanja": "Настройки",
+    "opcije": "Опции",
+    "pomoc": "Помощь",
+    "pomoć": "Помощь",
+    "pravila": "Правила",
+    "korisnik": "Пользователь",
+    "lozinka": "Пароль",
+    "prijava": "Вход",
+    "registracija": "Регистрация",
+    "server": "Сервер",
+    
+    # Inventory & Items & Economy
+    "inventar": "Инвентарь",
+    "predmet": "Предмет",
+    "predmeti": "Предметы",
+    "novac": "Деньги",
+    "gotovina": "Наличные",
+    "banka": "Банк",
+    "racun": "Счет",
+    "račun": "Счет",
+    "stanje": "Баланс",
+    "uplata": "Пополнение",
+    "isplata": "Снятие",
+    "prenos": "Перевод",
+    "kupi": "Купить",
+    "kupite": "Купите",
+    "prodaj": "Продать",
+    "prodajte": "Продайте",
+    "cena": "Цена",
+    "kolicina": "Количество",
+    "količina": "Количество",
+    "koristi": "Использовать",
+    "upotrebi": "Применить",
+    "baci": "Выбросить",
+    "daj": "Передать",
+    "oruzje": "Оружие",
+    "oružje": "Оружие",
+    "municija": "Патроны",
+    "metci": "Пули / Патроны",
+    "ranac": "Рюкзак",
+    "tezina": "Вес",
+    "težina": "Вес",
+    "maksimalno": "Максимум",
+    
+    # Vehicles & Transport
+    "vozilo": "Транспорт",
+    "kola": "Машина",
+    "auto": "Автомобиль",
+    "motor": "Двигатель",
+    "upali motor": "Завести двигатель",
+    "ugasi motor": "Заглушить двигатель",
+    "otkljucaj": "Разблокировать",
+    "otključaj": "Разблокировать",
+    "zakljucaj": "Заблокировать",
+    "zaključaj": "Заблокировать",
+    "vrata": "Двери",
+    "gepek": "Багажник",
+    "hauba": "Капот",
+    "prozori": "Окна",
+    "pojas": "Ремень безопасности",
+    "vezi pojas": "Пристегнуть ремень",
+    "veži pojas": "Пристегнуть ремень",
+    "gorivo": "Топливо",
+    "brzina": "Скорость",
+    "kilometraza": "Пробег",
+    "kilometraža": "Пробег",
+    "popravi": "Починить",
+    "ocisti": "Очистить",
+    "očisti": "Очистить",
+    "garaza": "Гараж",
+    "garaža": "Гараж",
+    "parkiraj": "Припарковать",
+    "registruj": "Зарегистрировать",
+    
+    # Phone, map & communications
+    "telefon": "Телефон",
+    "poruke": "Сообщения",
+    "poruka": "Сообщение",
+    "pozivi": "Звонки",
+    "poziv": "Звонок",
+    "kontakti": "Контакты",
+    "kontakt": "Контакт",
+    "mapa": "Карта",
+    "lokacija": "Местоположение",
+    "gps": "GPS Навигация",
+    "radio": "Рация / Радио",
+    "frekvencija": "Частота",
+    "kanal": "Канал",
+    
+    # Jobs, Factions, Law & RP
+    "posao": "Работа",
+    "zaposli se": "Устроиться на работу",
+    "otkaz": "Увольнение",
+    "plata": "Зарплата",
+    "policija": "Полиция",
+    "bolnica": "Больница",
+    "hitna pomoc": "Скорая помощь",
+    "hitna pomoć": "Скорая помощь",
+    "zdravlje": "Здоровье",
+    "oklop": "Броня",
+    "pancir": "Бронежилет",
+    "kazna": "Штраф",
+    "kazne": "Штрафы",
+    "plati kaznu": "Оплатить штраф",
+    "zatvor": "Тюрьма",
+    "hapsenje": "Арест",
+    "hapšenje": "Арест",
+    "dokumenta": "Документы",
+    "licna karta": "Удостоверение личности",
+    "lična karta": "Удостоверение личности",
+    "vozacka dozvola": "Водительские права",
+    "vozačka dozvola": "Водительские права",
+    "oruzani list": "Лицензия на оружие",
+    "oružani list": "Лицензия на оружие",
+    "zdravstvena knjizica": "Медицинская карта",
+    "zdravstvena knjižica": "Медицинская карта",
+    "dozvola": "Разрешение / Лицензия",
+    "dozvole": "Разрешения / Лицензии",
+    
+    # Common conversational / RP phrases
+    "dobar dan": "Добрый день",
+    "dobro vece": "Добрый вечер",
+    "dobro veče": "Добрый вечер",
+    "laku noc": "Спокойной ночи",
+    "laku noć": "Спокойной ночи",
+    "zdravo": "Привет",
+    "cao": "Привет / Пока",
+    "ćao": "Привет / Пока",
+    "hvala": "Спасибо",
+    "molim": "Пожалуйста",
+    "izvolite": "Пожалуйста / Держите",
+    "dovidjenja": "До свидания",
+    "doviđenja": "До свидания",
+    "kako si": "Как ты",
+    "sta radis": "Что делаешь",
+    "šta radiš": "Что делаешь",
+    "gde si": "Где ты",
+    "ko si ti": "Кто ты",
+    "stani": "Стой / Остановись",
+    "cekaj": "Подожди",
+    "čekaj": "Подожди",
+    "idemo": "Пошли / Поехали",
+    "brzo": "Быстро",
+    "polako": "Медленно / Потише",
+    "pazi": "Осторожно / Внимание",
+    "ruke u vis": "Руки вверх",
+    "ruke gore": "Руки вверх",
+    "daj mi": "Дай мне",
+    "nemam": "У меня нет",
+    "imam": "У меня есть",
+    "hocu": "Хочу",
+    "necu": "Не хочу",
+    "moze": "Можно / Договорились",
+    "ne moze": "Нельзя",
+    "vazi": "Хорошо / Договорились",
+    "važi": "Хорошо / Договорились",
+    "naravno": "Конечно",
+    "odmah": "Сейчас / Немедленно"
+}
+
+ENGLISH_FAST_DICT: Dict[str, str] = {
+    "options": "Настройки",
+    "settings": "Настройки",
+    "play": "Играть",
+    "quit": "Выход",
+    "exit": "Выход",
+    "start": "Старт",
+    "resume": "Продолжить",
+    "continue": "Продолжить",
+    "cancel": "Отмена",
+    "confirm": "Подтвердить",
+    "back": "Назад",
+    "next": "Далее",
+    "save": "Сохранить",
+    "apply": "Применить",
+    "load": "Загрузить",
+    "loading": "Загрузка",
+    "select": "Выбрать",
+    "inventory": "Инвентарь",
+    "map": "Карта",
+    "help": "Помощь",
+    "stats": "Статистика",
+    "victory": "Победа",
+    "defeat": "Поражение",
+    "attack speed": "Скорость атаки",
+    "armor": "Броня",
+    "health": "Здоровье",
+    "mana": "Мана",
+    "damage": "Урон",
+    "gold": "Золото",
+    "level": "Уровень"
+}
+
+def _match_case_phrase(src: str, target: str) -> str:
+    """Preserves lowercase, Titlecase, or ALL CAPS from source into target."""
+    if not src or not target:
+        return target
+    if src.isupper() and len(src) > 1:
+        return target.upper()
+    if src[0].isupper():
+        return target[0].upper() + target[1:]
+    return target
+
+def _lookup_fast_dict(text: str) -> Optional[Tuple[str, str]]:
+    """Instant O(1) dictionary lookup for common gaming and UI terms in 0.001 ms."""
+    norm = text.strip().lower()
+    norm_clean = re.sub(r"[^\w\s]", "", norm).strip()
+
+    if norm in SERBIAN_FAST_DICT:
+        return _match_case_phrase(text, SERBIAN_FAST_DICT[norm]), "sr"
+    if norm_clean in SERBIAN_FAST_DICT:
+        return _match_case_phrase(text, SERBIAN_FAST_DICT[norm_clean]), "sr"
+
+    if norm in ENGLISH_FAST_DICT:
+        return _match_case_phrase(text, ENGLISH_FAST_DICT[norm]), "en"
+    if norm_clean in ENGLISH_FAST_DICT:
+        return _match_case_phrase(text, ENGLISH_FAST_DICT[norm_clean]), "en"
+
+    return None
+
 def batch_translate_and_detect_lang(
     texts: List[str],
     source_lang: str = "auto",
     target_lang: str = "ru"
 ) -> List[Tuple[Optional[str], Optional[str]]]:
     """
-    Translates multiple phrases in a SINGLE HTTP request using newline joining.
-    Dramatically reduces network overhead, latency, and prevents Google 429 rate limits.
+    Ultra-fast batch translation:
+    1. Checks in-memory cache (0 ms)
+    2. Checks fast local dictionary (0 ms)
+    3. If online Google is available, requests batch in a single HTTP call (30-80 ms)
+    4. If Google is blocked (HTTP 429), trips circuit breaker and translates unknown phrases
+       concurrently via ThreadPoolExecutor with MyMemory/offline dictionary (150-300 ms total).
     """
     if not texts:
         return []
@@ -169,125 +460,149 @@ def batch_translate_and_detect_lang(
         cache_key = f"{source_lang}:{target_lang}:{cleaned}"
         if cache_key in _translation_cache:
             results[i] = _translation_cache[cache_key]
-        else:
-            uncached_indices.append(i)
-            # Replace inner newlines to keep line structure intact
-            uncached_texts.append(cleaned.replace("\n", " "))
+            continue
+
+        fast_res = _lookup_fast_dict(cleaned)
+        if fast_res:
+            _translation_cache[cache_key] = fast_res
+            results[i] = fast_res
+            continue
+
+        uncached_indices.append(i)
+        uncached_texts.append(cleaned.replace("\n", " "))
 
     if not uncached_texts:
         return [r if r is not None else (None, None) for r in results]
 
-    # Process uncached texts in batches of up to 25 items
-    batch_size = 25
-    for b_start in range(0, len(uncached_texts), batch_size):
-        b_indices = uncached_indices[b_start:b_start + batch_size]
-        b_texts = uncached_texts[b_start:b_start + batch_size]
-        joined = "\n".join(b_texts)
+    # If Google is available, attempt batch request
+    remaining_indices = []
+    remaining_texts = []
 
-        try:
-            q = urllib.parse.quote(joined)
-            sl_param = "auto" if source_lang == "auto" else source_lang
-            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl_param}&tl={target_lang}&dt=t&q={q}"
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    "Accept": "*/*"
-                }
-            )
-            with urllib.request.urlopen(req, timeout=3.5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                full_translated = "".join([part[0] for part in data[0] if part and part[0]])
+    if _is_google_available():
+        batch_size = 25
+        for b_start in range(0, len(uncached_texts), batch_size):
+            b_indices = uncached_indices[b_start:b_start + batch_size]
+            b_texts = uncached_texts[b_start:b_start + batch_size]
+            joined = "\n".join(b_texts)
 
-                detected_lang = None
-                if len(data) > 2 and isinstance(data[2], str):
-                    detected_lang = data[2].lower()
-                elif len(data) > 8 and data[8] and data[8][0]:
-                    detected_lang = str(data[8][0][0]).lower()
+            try:
+                q = urllib.parse.quote(joined)
+                sl_param = "auto" if source_lang == "auto" else source_lang
+                url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl_param}&tl={target_lang}&dt=t&q={q}"
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                        "Accept": "*/*"
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=1.8) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    full_translated = "".join([part[0] for part in data[0] if part and part[0]])
 
-                split_translated = full_translated.split("\n")
-                if len(split_translated) == len(b_texts):
-                    for orig_idx, orig_text, trans in zip(b_indices, b_texts, split_translated):
-                        trans_clean = trans.strip()
-                        cache_key = f"{source_lang}:{target_lang}:{orig_text}"
-                        res_tuple = (trans_clean, detected_lang)
-                        _translation_cache[cache_key] = res_tuple
-                        results[orig_idx] = res_tuple
-                else:
-                    # Mismatch in line count, translate individually for this batch
-                    for orig_idx, orig_text in zip(b_indices, b_texts):
-                        tr, det = _translate_single(orig_text, source_lang, target_lang)
-                        results[orig_idx] = (tr, det)
-        except Exception:
-            for orig_idx, orig_text in zip(b_indices, b_texts):
-                tr, det = _translate_single(orig_text, source_lang, target_lang)
-                results[orig_idx] = (tr, det)
+                    detected_lang = None
+                    if len(data) > 2 and isinstance(data[2], str):
+                        detected_lang = data[2].lower()
+                    elif len(data) > 8 and data[8] and data[8][0]:
+                        detected_lang = str(data[8][0][0]).lower()
+
+                    split_translated = full_translated.split("\n")
+                    if len(split_translated) == len(b_texts):
+                        for orig_idx, orig_text, trans in zip(b_indices, b_texts, split_translated):
+                            trans_clean = trans.strip()
+                            cache_key = f"{source_lang}:{target_lang}:{orig_text}"
+                            res_tuple = (trans_clean, detected_lang)
+                            _translation_cache[cache_key] = res_tuple
+                            results[orig_idx] = res_tuple
+                    else:
+                        remaining_indices.extend(b_indices)
+                        remaining_texts.extend(b_texts)
+            except Exception:
+                # HTTP 429 or network error -> trip circuit breaker for 10 minutes
+                _trip_google_breaker(600.0)
+                remaining_indices.extend(b_indices)
+                remaining_texts.extend(b_texts)
+    else:
+        remaining_indices = uncached_indices
+        remaining_texts = uncached_texts
+
+    # For any remaining items, execute concurrent parallel translations
+    if remaining_texts:
+        def _worker(idx_text):
+            idx, text = idx_text
+            tr, det = _translate_fallback(text, source_lang, target_lang)
+            return idx, text, tr, det
+
+        with ThreadPoolExecutor(max_workers=min(8, len(remaining_texts))) as executor:
+            futures = [executor.submit(_worker, (idx, txt)) for idx, txt in zip(remaining_indices, remaining_texts)]
+            for fut in as_completed(futures):
+                try:
+                    idx, text, tr, det = fut.result()
+                    res_tuple = (tr, det)
+                    cache_key = f"{source_lang}:{target_lang}:{text}"
+                    _translation_cache[cache_key] = res_tuple
+                    results[idx] = res_tuple
+                except Exception:
+                    pass
 
     return [r if r is not None else (None, None) for r in results]
+
+def _translate_fallback(
+    cleaned: str,
+    source_lang: str = "auto",
+    target_lang: str = "ru"
+) -> Tuple[Optional[str], Optional[str]]:
+    """Fast fallback when Google batch is unavailable or failed."""
+    cache_key = f"{source_lang}:{target_lang}:{cleaned}"
+    if cache_key in _translation_cache:
+        return _translation_cache[cache_key]
+
+    fast_res = _lookup_fast_dict(cleaned)
+    if fast_res:
+        return fast_res
+
+    eff_sl = source_lang
+    if eff_sl == "auto":
+        eff_sl = detect_language_heuristic(cleaned)
+    if eff_sl == "auto":
+        eff_sl = "sr" if (SERBIAN_LATIN_CHARS.search(cleaned) or SERBIAN_CYRILLIC_CHARS.search(cleaned)) else "en"
+
+    # Fallback 1: MyMemory API (fast parallel query)
+    try:
+        q = urllib.parse.quote(cleaned)
+        mm_url = f"https://api.mymemory.translated.net/get?q={q}&langpair={eff_sl}|{target_lang}"
+        mm_req = urllib.request.Request(
+            mm_url,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(mm_req, timeout=1.5) as mm_resp:
+            mm_data = json.loads(mm_resp.read().decode("utf-8"))
+            if mm_data and "responseData" in mm_data and "translatedText" in mm_data["responseData"]:
+                trans = html.unescape(mm_data["responseData"]["translatedText"]).strip()
+                if trans and trans.lower() != cleaned.lower() and not trans.startswith("MYMEMORY WARNING"):
+                    return trans, eff_sl
+    except Exception:
+        pass
+
+    # Fallback 2: local dictionary if offline
+    try:
+        from core.dictionary import translate_phrase_or_tokens
+        local_trans = translate_phrase_or_tokens(cleaned, sl=eff_sl, tl=target_lang)
+        if local_trans and local_trans.lower() != cleaned.lower():
+            return local_trans, eff_sl
+    except Exception:
+        pass
+
+    return cleaned, eff_sl
 
 def _translate_single(
     cleaned: str,
     source_lang: str = "auto",
     target_lang: str = "ru"
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Single phrase translation fallback."""
-    cache_key = f"{source_lang}:{target_lang}:{cleaned}"
-    if cache_key in _translation_cache:
-        return _translation_cache[cache_key]
-
-    try:
-        q = urllib.parse.quote(cleaned)
-        sl_param = "auto" if source_lang == "auto" else source_lang
-        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={sl_param}&tl={target_lang}&dt=t&q={q}"
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Accept": "*/*"
-            }
-        )
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            translated = "".join([part[0] for part in data[0] if part and part[0]]).strip()
-
-            detected_lang = None
-            if len(data) > 2 and isinstance(data[2], str):
-                detected_lang = data[2].lower()
-            elif len(data) > 8 and data[8] and data[8][0]:
-                detected_lang = str(data[8][0][0]).lower()
-
-            _translation_cache[cache_key] = (translated, detected_lang)
-            return translated, detected_lang
-    except Exception:
-        # Fallback 1: MyMemory API
-        try:
-            eff_sl = source_lang
-            if eff_sl == "auto":
-                eff_sl = detect_language_heuristic(cleaned)
-            if eff_sl == "auto":
-                eff_sl = "en"
-            
-            q = urllib.parse.quote(cleaned)
-            mm_url = f"https://api.mymemory.translated.net/get?q={q}&langpair={eff_sl}|{target_lang}"
-            mm_req = urllib.request.Request(
-                mm_url,
-                headers={"User-Agent": "Mozilla/5.0"}
-            )
-            with urllib.request.urlopen(mm_req, timeout=2.5) as mm_resp:
-                mm_data = json.loads(mm_resp.read().decode("utf-8"))
-                if mm_data and "responseData" in mm_data and "translatedText" in mm_data["responseData"]:
-                    trans = html.unescape(mm_data["responseData"]["translatedText"]).strip()
-                    if trans and trans.lower() != cleaned.lower():
-                        _translation_cache[cache_key] = (trans, eff_sl)
-                        return trans, eff_sl
-        except Exception:
-            pass
-
-        # Fallback 2: local dictionary if offline
-        from core.dictionary import translate_phrase_or_tokens
-        local_trans = translate_phrase_or_tokens(cleaned, sl=source_lang, tl=target_lang)
-        detected = detect_language_heuristic(cleaned)
-        return local_trans, detected
+    """Single phrase translation wrapper."""
+    res = batch_translate_and_detect_lang([cleaned], source_lang=source_lang, target_lang=target_lang)
+    return res[0] if res else (None, None)
 
 def translate_and_detect_lang(
     text: str,

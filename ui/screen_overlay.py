@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import Qt, QRectF, QTimer, pyqtSlot
 from PyQt6.QtGui import QPainter, QColor, QFont, QFontMetrics, QPen, QBrush
 
+import ctypes
 import win32gui
 import win32con
 
@@ -19,13 +20,12 @@ class OverlayBlock:
         self.last_seen = time.time()
 
     def update_box(self, new_box: tuple):
-        # Subtle smoothing for minor subpixel jitter (<=4px).
-        # When text moves or resizes, update position immediately so overlay never lags behind.
+        # Freeze minor subpixel jitter (<= 5px) to prevent vibrating / flickering
         dx = abs(self.box[0] - new_box[0])
         dy = abs(self.box[1] - new_box[1])
-        if dx <= 4 and dy <= 4:
-            self.box[0] = int(0.2 * self.box[0] + 0.8 * new_box[0])
-            self.box[1] = int(0.2 * self.box[1] + 0.8 * new_box[1])
+        if dx <= 5 and dy <= 5:
+            # Keep existing position to prevent text shaking
+            pass
         else:
             self.box[0] = new_box[0]
             self.box[1] = new_box[1]
@@ -67,7 +67,7 @@ class ScreenOverlayWindow(QWidget):
         self._enable_click_through()
 
     def _enable_click_through(self):
-        """Ensures the window never captures mouse input or steals keyboard focus."""
+        """Ensures the window never captures mouse input, steals keyboard focus, or appears in screen capture."""
         try:
             hwnd = int(self.winId())
             style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
@@ -76,8 +76,12 @@ class ScreenOverlayWindow(QWidget):
                 win32con.GWL_EXSTYLE,
                 style | win32con.WS_EX_TRANSPARENT | win32con.WS_EX_LAYERED | win32con.WS_EX_NOACTIVATE
             )
+            # WDA_EXCLUDEFROMCAPTURE = 0x00000011 (Windows 10 2004+)
+            # Completely excludes this overlay from screen grabs (mss, desktop capture, screenshot APIs).
+            # This prevents OCR from seeing the translated Russian text and blinding itself in an infinite flicker loop.
+            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
         except Exception as e:
-            print(f"[ScreenOverlay] Error enabling click-through: {e}")
+            print(f"[ScreenOverlay] Error enabling click-through / display affinity: {e}")
 
     @pyqtSlot(list)
     def update_blocks(self, raw_blocks: List[Dict[str, Any]]):
@@ -93,14 +97,15 @@ class ScreenOverlayWindow(QWidget):
             if not trans:
                 continue
 
-            # Look for existing matching block nearby with matching content
+            # Look for existing matching block nearby (spatial proximity or matching content)
             found = False
             for existing in self._active_blocks:
                 dist_x = abs(existing.box[0] - box[0])
                 dist_y = abs(existing.box[1] - box[1])
                 same_text = (existing.src_text.lower() == src.lower())
 
-                if (same_text and dist_x < 50 and dist_y < 30) or (dist_x < 15 and dist_y < 12):
+                # If text matches within reasonable area, or position is very close (<35px x, <20px y)
+                if (same_text and dist_x < 60 and dist_y < 35) or (dist_x < 35 and dist_y < 20):
                     existing.update_box(box)
                     existing.src_text = src
                     existing.trans_text = trans
@@ -119,7 +124,7 @@ class ScreenOverlayWindow(QWidget):
     def _purge_expired_blocks(self):
         """Removes blocks that haven't been re-detected within the lifespan threshold."""
         now = time.time()
-        lifespan = config.get("ocr.auto_clear_ms", 3500) / 1000.0
+        lifespan = config.get("ocr.auto_clear_ms", 5000) / 1000.0
 
         alive = []
         for block in self._active_blocks:

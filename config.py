@@ -14,7 +14,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "opacity": 0.94,
         "filter_by_source_lang": True,
         "confidence_threshold": 0.35,
-        "auto_clear_ms": 3500
+        "auto_clear_ms": 5000
     },
     "hotkeys": {
         "scan": "Ctrl+Alt+S",
